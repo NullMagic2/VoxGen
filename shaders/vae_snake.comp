@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=256,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Model { uint model_words[]; };
+layout(set=0,binding=1,std430) readonly buffer Input { float input_values[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float output_values[]; };
+layout(push_constant) uniform Push { uint alpha_offset; uint channels; uint elem_count; uint dtype; } pc;
+float load_f16(uint byte_offset){uint word=model_words[byte_offset>>2u];vec2 h=unpackHalf2x16(word);return((byte_offset&2u)==0u)?h.x:h.y;}
+float load_f32(uint byte_offset){return uintBitsToFloat(model_words[byte_offset>>2u]);}
+void main(){
+    uint t=gl_GlobalInvocationID.x;
+    uint c=gl_GlobalInvocationID.y;
+    if(t>=pc.elem_count || c>=pc.channels)return;
+    uint i=c*pc.elem_count+t;
+    float a=pc.dtype==1u?load_f16(pc.alpha_offset+c*2u):load_f32(pc.alpha_offset+c*4u);
+    float x=input_values[i];
+    float s=sin(a*x);
+    output_values[i]=x+(s*s)/(a+1e-9);
+}

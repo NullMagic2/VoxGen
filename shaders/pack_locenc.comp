@@ -1,0 +1,8 @@
+#version 460
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Model{uint w[];}model;
+layout(set=0,binding=1,std430) readonly buffer Proj{float x[];}pb;
+layout(set=0,binding=2,std430) writeonly buffer Hidden{float h[];}hb;
+layout(push_constant) uniform Push{uint cls_offset;uint cls_dtype;uint hidden;uint patch_tokens;}pc;
+float f16_at(uint o){uint v=model.w[o>>2u];uint b=(v>>((o&2u)*8u))&65535u;return unpackHalf2x16(b).x;}float f32_at(uint o){return uintBitsToFloat(model.w[o>>2u]);}
+void main(){uint i=gl_GlobalInvocationID.x;uint uintotal=(pc.patch_tokens+1u)*pc.hidden;if(i>=uintotal)return;if(i<pc.hidden){hb.h[i]=pc.cls_dtype==0u?f32_at(pc.cls_offset+i*4u):f16_at(pc.cls_offset+i*2u);}else{uint j=i-pc.hidden;hb.h[i]=pb.x[j];}}

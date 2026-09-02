@@ -1,0 +1,47 @@
+#version 460
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) buffer ScoreBuffer { float scores[]; } score_buf;
+
+layout(push_constant) uniform Push {
+    uint context;
+    uint position;
+} pc;
+
+shared float scratch[256];
+shared float global_max;
+shared float inv_sum;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    float local_max = -3.402823466e+38;
+    for (uint t = lane; t <= pc.position; t += 256u) {
+        local_max = max(local_max, score_buf.scores[head * pc.context + t]);
+    }
+    scratch[lane] = local_max;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] = max(scratch[lane], scratch[lane + stride]);
+        barrier();
+    }
+    if (lane == 0u) global_max = scratch[0];
+    barrier();
+
+    float local_sum = 0.0;
+    for (uint t = lane; t <= pc.position; t += 256u) {
+        local_sum += exp(score_buf.scores[head * pc.context + t] - global_max);
+    }
+    scratch[lane] = local_sum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) inv_sum = 1.0 / scratch[0];
+    barrier();
+
+    for (uint t = lane; t <= pc.position; t += 256u) {
+        score_buf.scores[head * pc.context + t] = exp(score_buf.scores[head * pc.context + t] - global_max) * inv_sum;
+    }
+}

@@ -1,0 +1,30 @@
+#version 460
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer Model{uint w[];} model;
+layout(set=0,binding=1,std430) readonly buffer Input{float x[];} input_buf;
+layout(set=0,binding=2,std430) writeonly buffer Output{float y[];} output_buf;
+layout(push_constant) uniform Push{
+ uint weight_offset; uint bias_offset; uint rows; uint cols;
+ uint weight_dtype; uint bias_dtype; uint tokens; uint input_stride;
+ uint output_stride; uint input_base; uint output_base; uint has_bias; float alpha;
+} pc;
+shared float partial[256];
+uint load_u8(uint o){uint v=model.w[o>>2u]; return (v>>((o&3u)*8u))&255u;}
+float f16_at(uint o){uint v=model.w[o>>2u]; uint b=(v>>((o&2u)*8u))&65535u; return unpackHalf2x16(b).x;}
+float f32_at(uint o){return uintBitsToFloat(model.w[o>>2u]);}
+float scalar(uint o,uint t){return t==0u?f32_at(o):f16_at(o);}
+float weight(uint r,uint c){
+ if(pc.weight_dtype==0u) return f32_at(pc.weight_offset+(r*pc.cols+c)*4u);
+ if(pc.weight_dtype==1u) return f16_at(pc.weight_offset+(r*pc.cols+c)*2u);
+ uint blocks=pc.cols/32u; uint base=pc.weight_offset+(r*blocks+c/32u)*34u;
+ int q=int(load_u8(base+2u+(c&31u))); if(q>=128)q-=256; return f16_at(base)*float(q);
+}
+void main(){
+ uint lane=gl_LocalInvocationID.x, row=gl_WorkGroupID.x, tok=gl_WorkGroupID.y;
+ if(row>=pc.rows||tok>=pc.tokens)return;
+ float s=0.0; uint ib=pc.input_base+tok*pc.input_stride;
+ for(uint c=lane;c<pc.cols;c+=256u)s+=weight(row,c)*input_buf.x[ib+c];
+ partial[lane]=s; barrier();
+ for(uint st=128u;st>0u;st>>=1u){if(lane<st)partial[lane]+=partial[lane+st];barrier();}
+ if(lane==0u){float b=pc.has_bias!=0u?scalar(pc.bias_offset+row*(pc.bias_dtype==0u?4u:2u),pc.bias_dtype):0.0; output_buf.y[pc.output_base+tok*pc.output_stride+row]=(partial[0]+b)*pc.alpha;}
+}

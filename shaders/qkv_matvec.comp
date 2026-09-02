@@ -1,0 +1,95 @@
+#version 460
+
+// Shared Q/K/V projection. One dispatch covers all three projections so the
+// normalized input stays hot in cache and command/pipeline overhead is paid once.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer ModelBuffer { uint model_words[]; } model_buf;
+layout(set = 0, binding = 1, std430) readonly buffer InputBuffer { float x[]; } in_buf;
+layout(set = 0, binding = 2, std430) writeonly buffer QBuffer { float y[]; } q_buf;
+layout(set = 0, binding = 3, std430) writeonly buffer KBuffer { float y[]; } k_buf;
+layout(set = 0, binding = 4, std430) writeonly buffer VBuffer { float y[]; } v_buf;
+
+layout(push_constant) uniform Push {
+    uint q_weight_offset;
+    uint k_weight_offset;
+    uint v_weight_offset;
+    uint q_rows;
+    uint kv_rows;
+    uint cols;
+    uint q_dtype;
+    uint k_dtype;
+    uint v_dtype;
+    uint row_base;
+} pc;
+
+shared float partial[256];
+
+uint load_u8(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 3u) * 8u;
+    return (word >> shift) & 0xffu;
+}
+
+float load_f16(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 2u) * 8u;
+    uint bits = (word >> shift) & 0xffffu;
+    return unpackHalf2x16(bits).x;
+}
+
+float load_weight(uint weight_offset, uint dtype, uint row, uint col) {
+    if (dtype == 1u) {
+        return load_f16(weight_offset + (row * pc.cols + col) * 2u);
+    }
+    uint blocks_per_row = pc.cols / 32u;
+    uint block = row * blocks_per_row + col / 32u;
+    uint base = weight_offset + block * 34u;
+    float d = load_f16(base);
+    uint raw = load_u8(base + 2u + (col & 31u));
+    int q = raw < 128u ? int(raw) : int(raw) - 256;
+    return d * float(q);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint combined_row = pc.row_base + gl_WorkGroupID.x;
+    uint total_rows = pc.q_rows + 2u * pc.kv_rows;
+    if (combined_row >= total_rows) return;
+
+    uint weight_offset;
+    uint dtype;
+    uint row;
+    uint target;
+    if (combined_row < pc.q_rows) {
+        weight_offset = pc.q_weight_offset;
+        dtype = pc.q_dtype;
+        row = combined_row;
+        target = 0u;
+    } else if (combined_row < pc.q_rows + pc.kv_rows) {
+        weight_offset = pc.k_weight_offset;
+        dtype = pc.k_dtype;
+        row = combined_row - pc.q_rows;
+        target = 1u;
+    } else {
+        weight_offset = pc.v_weight_offset;
+        dtype = pc.v_dtype;
+        row = combined_row - pc.q_rows - pc.kv_rows;
+        target = 2u;
+    }
+
+    float sum = 0.0;
+    for (uint col = lane; col < pc.cols; col += 256u) {
+        sum += load_weight(weight_offset, dtype, row, col) * in_buf.x[col];
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) {
+        if (target == 0u) q_buf.y[row] = partial[0];
+        else if (target == 1u) k_buf.y[row] = partial[0];
+        else v_buf.y[row] = partial[0];
+    }
+}

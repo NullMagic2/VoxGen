@@ -1,0 +1,28 @@
+#version 460
+
+// F16 token-sequence Q/K/V projection used by LocEnc/LocDiT.
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Model { uint w[]; } model;
+layout(set=0,binding=1,std430) readonly buffer Input { float x[]; } input_buf;
+layout(set=0,binding=2,std430) writeonly buffer Q { float y[]; } q_buf;
+layout(set=0,binding=3,std430) writeonly buffer K { float y[]; } k_buf;
+layout(set=0,binding=4,std430) writeonly buffer V { float y[]; } v_buf;
+layout(push_constant) uniform Push {
+    uint q_weight_offset; uint k_weight_offset; uint v_weight_offset;
+    uint q_rows; uint kv_rows; uint cols; uint tokens;
+    uint input_stride; uint q_stride; uint kv_stride; uint input_base;
+} pc;
+shared float partial[256];
+float f16_at(uint o){uint v=model.w[o>>2u];uint b=(v>>((o&2u)*8u))&65535u;return unpackHalf2x16(b).x;}
+void main(){
+    uint lane=gl_LocalInvocationID.x, combined=gl_WorkGroupID.x, tok=gl_WorkGroupID.y;
+    uint total=pc.q_rows+2u*pc.kv_rows;if(combined>=total||tok>=pc.tokens)return;
+    uint off,row,target;
+    if(combined<pc.q_rows){off=pc.q_weight_offset;row=combined;target=0u;}
+    else if(combined<pc.q_rows+pc.kv_rows){off=pc.k_weight_offset;row=combined-pc.q_rows;target=1u;}
+    else{off=pc.v_weight_offset;row=combined-pc.q_rows-pc.kv_rows;target=2u;}
+    uint ib=pc.input_base+tok*pc.input_stride;float s=0.0;uint rb=off+row*pc.cols*2u;
+    for(uint c=lane;c<pc.cols;c+=256u)s+=f16_at(rb+c*2u)*input_buf.x[ib+c];
+    partial[lane]=s;barrier();for(uint st=128u;st>0u;st>>=1u){if(lane<st)partial[lane]+=partial[lane+st];barrier();}
+    if(lane==0u){if(target==0u)q_buf.y[tok*pc.q_stride+row]=partial[0];else if(target==1u)k_buf.y[tok*pc.kv_stride+row]=partial[0];else v_buf.y[tok*pc.kv_stride+row]=partial[0];}
+}

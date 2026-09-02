@@ -1,0 +1,10 @@
+#version 460
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Model{uint w[];}model;
+layout(set=0,binding=1,std430) buffer Hidden{float h[];}hidden_buf;
+layout(set=0,binding=2,std430) readonly buffer Branch{float b[];}branch_buf;
+layout(set=0,binding=3,std430) writeonly buffer Output{float y[];}output_buf;
+layout(push_constant) uniform Push{uint weight_offset;uint n;uint tokens;uint hidden_stride;uint branch_stride;uint output_stride;uint hidden_base;uint branch_base;uint output_base;float eps;float scale;}pc;
+shared float p[256]; shared float invr;
+float f32_at(uint o){return uintBitsToFloat(model.w[o>>2u]);}
+void main(){uint lane=gl_LocalInvocationID.x,t=gl_WorkGroupID.x;if(t>=pc.tokens)return;uint hb=pc.hidden_base+t*pc.hidden_stride,bb=pc.branch_base+t*pc.branch_stride,ob=pc.output_base+t*pc.output_stride;float s=0.0;for(uint k=lane;k<pc.n;k+=256u){float v=hidden_buf.h[hb+k]+pc.scale*branch_buf.b[bb+k];hidden_buf.h[hb+k]=v;s+=v*v;}p[lane]=s;barrier();for(uint st=128u;st>0u;st>>=1u){if(lane<st)p[lane]+=p[lane+st];barrier();}if(lane==0u)invr=inversesqrt(p[0]/float(pc.n)+pc.eps);barrier();for(uint k=lane;k<pc.n;k+=256u)output_buf.y[ob+k]=hidden_buf.h[hb+k]*invr*f32_at(pc.weight_offset+k*4u);}

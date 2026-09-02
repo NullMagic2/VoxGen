@@ -1,0 +1,8 @@
+#version 460
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Q{float q[];} qb;
+layout(set=0,binding=1,std430) readonly buffer K{float k[];} kb;
+layout(set=0,binding=2,std430) writeonly buffer Scores{float s[];} sb;
+layout(push_constant) uniform Push{uint tokens;uint q_heads;uint kv_heads;uint head_dim;uint q_stride;uint k_stride;uint score_stride;}pc;
+shared float p[64];
+void main(){uint lane=gl_LocalInvocationID.x,key=gl_WorkGroupID.x,head=gl_WorkGroupID.y,qtoken=gl_WorkGroupID.z;if(key>=pc.tokens||head>=pc.q_heads||qtoken>=pc.tokens)return;uint kv=head/(pc.q_heads/pc.kv_heads);uint qbase=qtoken*pc.q_stride+head*pc.head_dim,kbase=key*pc.k_stride+kv*pc.head_dim;float v=0.0;for(uint i=lane;i<pc.head_dim;i+=64u)v+=qb.q[qbase+i]*kb.k[kbase+i];p[lane]=v;barrier();for(uint st=32u;st>0u;st>>=1u){if(lane<st)p[lane]+=p[lane+st];barrier();}if(lane==0u)sb.s[(qtoken*pc.q_heads+head)*pc.score_stride+key]=p[0]*inversesqrt(float(pc.head_dim));}

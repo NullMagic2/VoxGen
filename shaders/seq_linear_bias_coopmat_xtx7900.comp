@@ -1,0 +1,93 @@
+#version 460
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// RX 7900 XTX pass-2 LocEnc/LocDiT linear kernel.
+// One forced wave32 computes a 16x16 output tile with RDNA3 cooperative matrices.
+layout(local_size_x = 32) in;
+
+layout(set=0,binding=0,std430) readonly buffer ModelWords { uint w[]; } model_words;
+layout(set=0,binding=1,std430) readonly buffer Input { float x[]; } input_buf;
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; } output_buf;
+
+layout(push_constant) uniform Push {
+    uint weight_offset; uint bias_offset; uint rows; uint cols;
+    uint weight_dtype; uint bias_dtype; uint tokens; uint input_stride;
+    uint output_stride; uint input_base; uint output_base; uint has_bias; float alpha;
+} pc;
+
+shared float16_t a_tile[16 * 16];
+shared float16_t b_tile[16 * 16];
+shared float c_tile[16 * 16];
+
+float f16_at(uint byte_offset) {
+    uint v = model_words.w[byte_offset >> 2u];
+    uint bits = (v >> ((byte_offset & 2u) * 8u)) & 65535u;
+    return unpackHalf2x16(bits).x;
+}
+float f32_at(uint byte_offset) { return uintBitsToFloat(model_words.w[byte_offset >> 2u]); }
+float scalar(uint byte_offset, uint dtype) { return dtype == 0u ? f32_at(byte_offset) : f16_at(byte_offset); }
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint out_tile = gl_WorkGroupID.x;
+    uint first_row = out_tile * 16u;
+
+    // This specialized path is only selected for the acoustic F16 matrices.
+    if (pc.weight_dtype != 1u || pc.tokens > 16u || (pc.cols & 15u) != 0u || (pc.rows & 15u) != 0u) return;
+
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> A;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> B;
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> C =
+        coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+    for (uint kb = 0u; kb < pc.cols; kb += 16u) {
+        // Convert the 16 token rows for this K tile to F16 cooperatively.
+        for (uint e = lane; e < 256u; e += 32u) {
+            uint tok = e >> 4u;
+            uint k = e & 15u;
+            float v = 0.0;
+            if (tok < pc.tokens) {
+                v = input_buf.x[pc.input_base + tok * pc.input_stride + kb + k];
+            }
+            a_tile[e] = float16_t(v);
+        }
+
+        // Load 16 output rows x 16 input columns. Two F16 values share each
+        // packed u32, so each lane brings in pairs without duplicate global reads.
+        for (uint pair = lane; pair < 128u; pair += 32u) {
+            uint e = pair * 2u;
+            uint local_row = e >> 4u;
+            uint k = e & 15u;
+            uint byte_offset = pc.weight_offset
+                + ((first_row + local_row) * pc.cols + kb + k) * 2u;
+            vec2 w = unpackHalf2x16(model_words.w[byte_offset >> 2u]);
+            b_tile[e] = float16_t(w.x);
+            b_tile[e + 1u] = float16_t(w.y);
+        }
+        barrier();
+
+        coopMatLoad(A, a_tile, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        // b_tile is physically [output][input]; column-major interpretation is
+        // therefore the transposed KxN matrix needed by A*B.
+        coopMatLoad(B, b_tile, 0u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+        C = coopMatMulAdd(A, B, C);
+        barrier();
+    }
+
+    coopMatStore(C, c_tile, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+    barrier();
+
+    for (uint e = lane; e < 256u; e += 32u) {
+        uint tok = e >> 4u;
+        uint local_row = e & 15u;
+        uint row = first_row + local_row;
+        if (tok < pc.tokens && row < pc.rows) {
+            float bias = pc.has_bias != 0u
+                ? scalar(pc.bias_offset + row * (pc.bias_dtype == 0u ? 4u : 2u), pc.bias_dtype)
+                : 0.0;
+            output_buf.y[pc.output_base + tok * pc.output_stride + row] = (c_tile[e] + bias) * pc.alpha;
+        }
+    }
+}

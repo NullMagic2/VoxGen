@@ -1,0 +1,10 @@
+#version 460
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Mu1{float x[];}m1;
+layout(set=0,binding=1,std430) readonly buffer Mu2{float x[];}m2;
+layout(set=0,binding=2,std430) readonly buffer Time{float x[];}tb;
+layout(set=0,binding=3,std430) readonly buffer Cond{float x[];}cb;
+layout(set=0,binding=4,std430) readonly buffer X{float x[];}xb;
+layout(set=0,binding=5,std430) writeonly buffer Hidden{float x[];}hb;
+layout(push_constant) uniform Push{uint hidden;uint patch_tokens;uint zero_mu;}pc;
+void main(){uint i=gl_GlobalInvocationID.x;uint total=(3u+2u*pc.patch_tokens)*pc.hidden;if(i>=total)return;uint tok=i/pc.hidden,d=i%pc.hidden;if(tok==0u)hb.x[i]=pc.zero_mu!=0u?0.0:m1.x[d];else if(tok==1u)hb.x[i]=pc.zero_mu!=0u?0.0:m2.x[d];else if(tok==2u)hb.x[i]=tb.x[d];else if(tok<3u+pc.patch_tokens)hb.x[i]=cb.x[(tok-3u)*pc.hidden+d];else hb.x[i]=xb.x[(tok-(3u+pc.patch_tokens))*pc.hidden+d];}

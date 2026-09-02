@@ -1,0 +1,12 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=256) in;layout(set=0,binding=0,std430)readonly buffer M{uint w[];}m;layout(set=0,binding=1,std430)readonly buffer I{float x[];}i;layout(set=0,binding=2,std430)writeonly buffer O{float y[];}o;
+layout(push_constant)uniform Push{uint weight_offset;uint bias_offset;uint rows;uint cols;uint weight_dtype;uint bias_dtype;uint row_base;float alpha;}pc;shared float waves[8];
+uint u8(uint a){uint v=m.w[a>>2u];return(v>>((a&3u)*8u))&255u;}float f16(uint a){uint v=m.w[a>>2u];return unpackHalf2x16((v>>((a&2u)*8u))&65535u).x;}float f32(uint a){return uintBitsToFloat(m.w[a>>2u]);}float scalar(uint a,uint t){return t==0u?f32(a):f16(a);}float red(float v){float w=subgroupAdd(v);if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){float q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:0.0;q=subgroupAdd(q);if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}
+void main(){uint lane=gl_LocalInvocationID.x,row=pc.row_base+gl_WorkGroupID.x;if(row>=pc.rows)return;float s=0.0;
+ if(pc.weight_dtype==1u){uint rb=pc.weight_offset+row*pc.cols*2u;for(uint c=lane*4u;c<pc.cols;c+=1024u){vec2 w01=unpackHalf2x16(m.w[(rb+c*2u)>>2u]);vec2 w23=unpackHalf2x16(m.w[(rb+c*2u+4u)>>2u]);s+=w01.x*i.x[c];if(c+1u<pc.cols)s+=w01.y*i.x[c+1u];if(c+2u<pc.cols)s+=w23.x*i.x[c+2u];if(c+3u<pc.cols)s+=w23.y*i.x[c+3u];}}
+ else if(pc.weight_dtype==0u){uint rb=pc.weight_offset+row*pc.cols*4u;for(uint c=lane*2u;c<pc.cols;c+=512u){s+=f32(rb+c*4u)*i.x[c];if(c+1u<pc.cols)s+=f32(rb+(c+1u)*4u)*i.x[c+1u];}}
+ else {uint blocks=pc.cols/32u;for(uint c=lane*4u;c<pc.cols;c+=1024u){uint base=pc.weight_offset+(row*blocks+c/32u)*34u;float d=f16(base);uint qoff=base+2u+(c&31u);uint r0=u8(qoff),r1=u8(qoff+1u),r2=u8(qoff+2u),r3=u8(qoff+3u);int q0=r0<128u?int(r0):int(r0)-256,q1=r1<128u?int(r1):int(r1)-256,q2=r2<128u?int(r2):int(r2)-256,q3=r3<128u?int(r3):int(r3)-256;s+=d*(float(q0)*i.x[c]+float(q1)*i.x[c+1u]+float(q2)*i.x[c+2u]+float(q3)*i.x[c+3u]);}}
+ float t=red(s);if(lane==0u){float b=scalar(pc.bias_offset+row*(pc.bias_dtype==0u?4u:2u),pc.bias_dtype);o.y[row]=(t+b)*pc.alpha;}}

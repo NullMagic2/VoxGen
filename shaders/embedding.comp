@@ -1,0 +1,48 @@
+#version 460
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer ModelBuffer { uint model_words[]; } model_buf;
+layout(set = 0, binding = 1, std430) writeonly buffer HiddenBuffer { float hidden[]; } out_buf;
+
+layout(push_constant) uniform Push {
+    uint weight_offset;
+    uint cols;
+    uint token_id;
+    uint dtype;
+    float alpha;
+} pc;
+
+uint load_u8(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 3u) * 8u;
+    return (word >> shift) & 0xffu;
+}
+
+float load_f16(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 2u) * 8u;
+    uint bits = (word >> shift) & 0xffffu;
+    return unpackHalf2x16(bits).x;
+}
+
+float load_weight(uint row, uint col) {
+    if (pc.dtype == 1u) { // GGML_TYPE_F16
+        uint row_bytes = pc.cols * 2u;
+        return load_f16(pc.weight_offset + row * row_bytes + col * 2u);
+    }
+    // GGML_TYPE_Q8_0: fp16 scale + 32 signed bytes per 32-value block.
+    uint blocks_per_row = pc.cols / 32u;
+    uint block = row * blocks_per_row + col / 32u;
+    uint base = pc.weight_offset + block * 34u;
+    float d = load_f16(base);
+    uint raw = load_u8(base + 2u + (col & 31u));
+    int q = raw < 128u ? int(raw) : int(raw) - 256;
+    return d * float(q);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint i = lane; i < pc.cols; i += 256u) {
+        out_buf.hidden[i] = load_weight(pc.token_id, i) * pc.alpha;
+    }
+}

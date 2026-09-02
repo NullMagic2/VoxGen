@@ -1,0 +1,49 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Model { uint model_words[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Input { float input_values[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float output_values[]; };
+layout(push_constant) uniform Push {
+    uint weight_offset;
+    uint bias_offset;
+    uint in_channels;
+    uint out_channels;
+    uint in_length;
+    uint out_length;
+    uint kernel;
+    uint stride;
+    uint groups;
+    uint weight_dtype;
+    uint bias_dtype;
+    uint has_bias;
+} pc;
+float load_f16(uint byte_offset) { uint word=model_words[byte_offset>>2u]; vec2 h=unpackHalf2x16(word); return ((byte_offset&2u)==0u)?h.x:h.y; }
+float load_f32(uint byte_offset) { return uintBitsToFloat(model_words[byte_offset>>2u]); }
+float load_model(uint base,uint index,uint dtype){ return dtype==1u?load_f16(base+index*2u):load_f32(base+index*4u); }
+void main(){
+    uint t=gl_GlobalInvocationID.x, oc=gl_GlobalInvocationID.y;
+    if(t>=pc.out_length||oc>=pc.out_channels) return;
+    uint out_per_group=pc.out_channels/pc.groups;
+    uint in_per_group=pc.in_channels/pc.groups;
+    uint group=oc/out_per_group;
+    uint ocg=oc-group*out_per_group;
+    uint in_base=group*in_per_group;
+    float sum=pc.has_bias!=0u?load_model(pc.bias_offset,oc,pc.bias_dtype):0.0;
+    // Only kernels with k == t (mod stride) can contribute. VoxCPM2 uses
+    // kernel=2*stride, so this is normally two taps per input channel rather
+    // than scanning all 2*stride taps and rejecting most of them.
+    uint first_k=t%pc.stride;
+    for(uint icg=0u;icg<in_per_group;++icg){
+        uint ic=in_base+icg;
+        for(uint k=first_k;k<pc.kernel;k+=pc.stride){
+            if(t<k) continue;
+            uint ti=(t-k)/pc.stride;
+            if(ti>=pc.in_length) continue;
+            // PyTorch ConvTranspose1d raw weight layout: [in_channels, out_channels/groups, kernel].
+            uint wi=(ic*out_per_group+ocg)*pc.kernel+k;
+            sum += input_values[ic*pc.in_length+ti]*load_model(pc.weight_offset,wi,pc.weight_dtype);
+        }
+    }
+    // CausalTransposeConv1d crops only the right tail. These are exactly its retained samples.
+    output_values[oc*pc.out_length+t]=sum;
+}

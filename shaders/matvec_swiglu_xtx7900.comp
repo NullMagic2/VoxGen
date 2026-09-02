@@ -1,0 +1,17 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=256)in;
+layout(set=0,binding=0,std430)readonly buffer M{uint w[];}m;
+layout(set=0,binding=1,std430)readonly buffer I{float x[];}i;
+layout(set=0,binding=2,std430)writeonly buffer O{float y[];}o;
+layout(push_constant)uniform Push{uint gate_weight_offset;uint up_weight_offset;uint rows;uint cols;uint dtype;uint row_base;}pc;
+shared vec2 waves[8];
+uint u8(uint a){uint v=m.w[a>>2u];return(v>>((a&3u)*8u))&255u;}
+float f16(uint a){uint v=m.w[a>>2u];return unpackHalf2x16((v>>((a&2u)*8u))&65535u).x;}
+vec2 red(vec2 v){vec2 w=vec2(subgroupAdd(v.x),subgroupAdd(v.y));if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){vec2 q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:vec2(0.0);q=vec2(subgroupAdd(q.x),subgroupAdd(q.y));if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}
+void main(){uint lane=gl_LocalInvocationID.x,row=pc.row_base+gl_WorkGroupID.x;if(row>=pc.rows)return;vec2 s=vec2(0.0);
+ if(pc.dtype==1u){uint gr=pc.gate_weight_offset+row*pc.cols*2u,ur=pc.up_weight_offset+row*pc.cols*2u;for(uint c=lane*4u;c<pc.cols;c+=1024u){vec2 g01=unpackHalf2x16(m.w[(gr+c*2u)>>2u]),g23=unpackHalf2x16(m.w[(gr+c*2u+4u)>>2u]);vec2 u01=unpackHalf2x16(m.w[(ur+c*2u)>>2u]),u23=unpackHalf2x16(m.w[(ur+c*2u+4u)>>2u]);float x0=i.x[c];s+=vec2(g01.x*x0,u01.x*x0);if(c+1u<pc.cols){float x1=i.x[c+1u];s+=vec2(g01.y*x1,u01.y*x1);}if(c+2u<pc.cols){float x2=i.x[c+2u];s+=vec2(g23.x*x2,u23.x*x2);}if(c+3u<pc.cols){float x3=i.x[c+3u];s+=vec2(g23.y*x3,u23.y*x3);}}}
+ else {uint blocks=pc.cols/32u;for(uint c=lane*4u;c<pc.cols;c+=1024u){uint gb=pc.gate_weight_offset+(row*blocks+c/32u)*34u,ub=pc.up_weight_offset+(row*blocks+c/32u)*34u;float gd=f16(gb),ud=f16(ub);uint gq=gb+2u+(c&31u),uq=ub+2u+(c&31u);uint gr0=u8(gq),gr1=u8(gq+1u),gr2=u8(gq+2u),gr3=u8(gq+3u),ur0=u8(uq),ur1=u8(uq+1u),ur2=u8(uq+2u),ur3=u8(uq+3u);int g0=gr0<128u?int(gr0):int(gr0)-256,g1=gr1<128u?int(gr1):int(gr1)-256,g2=gr2<128u?int(gr2):int(gr2)-256,g3=gr3<128u?int(gr3):int(gr3)-256,u0=ur0<128u?int(ur0):int(ur0)-256,u1=ur1<128u?int(ur1):int(ur1)-256,u2=ur2<128u?int(ur2):int(ur2)-256,u3=ur3<128u?int(ur3):int(ur3)-256;float x0=i.x[c],x1=i.x[c+1u],x2=i.x[c+2u],x3=i.x[c+3u];s+=vec2(gd*float(g0)*x0,ud*float(u0)*x0)+vec2(gd*float(g1)*x1,ud*float(u1)*x1)+vec2(gd*float(g2)*x2,ud*float(u2)*x2)+vec2(gd*float(g3)*x3,ud*float(u3)*x3);}}
+ vec2 total=red(s);if(lane==0u){float g=total.x;o.y[row]=(g/(1.0+exp(-g)))*total.y;}}

@@ -1,0 +1,44 @@
+#version 460
+
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer QueryBuffer { float q[]; } q_buf;
+layout(set = 0, binding = 1, std430) readonly buffer KeyCache { uint words[]; } k_cache;
+layout(set = 0, binding = 2, std430) writeonly buffer ScoreBuffer { float scores[]; } score_buf;
+
+layout(push_constant) uniform Push {
+    uint layer;
+    uint context;
+    uint position;
+    uint head_dim;
+    uint q_per_kv;
+    uint kv_heads;
+} pc;
+
+shared float partial[128];
+
+float load_cache(uint layer, uint pos, uint dim) {
+    uint kv_dim = pc.kv_heads * pc.head_dim;
+    uint words_per_token = kv_dim / 2u;
+    uint word_i = (layer * pc.context + pos) * words_per_token + dim / 2u;
+    vec2 pair = unpackHalf2x16(k_cache.words[word_i]);
+    return (dim & 1u) == 0u ? pair.x : pair.y;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint t = gl_WorkGroupID.x;
+    uint qh = gl_WorkGroupID.y;
+    if (t > pc.position || lane >= pc.head_dim) return;
+    uint kvh = qh / pc.q_per_kv;
+    uint kv_dim_index = kvh * pc.head_dim + lane;
+    float product = q_buf.q[qh * pc.head_dim + lane] * load_cache(pc.layer, t, kv_dim_index);
+    partial[lane] = product;
+    barrier();
+    for (uint stride = 64u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) {
+        score_buf.scores[qh * pc.context + t] = partial[0] * inversesqrt(float(pc.head_dim));
+    }
+}

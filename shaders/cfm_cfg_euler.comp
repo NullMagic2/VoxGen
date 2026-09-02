@@ -1,0 +1,36 @@
+#version 460
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) buffer XBuffer { float x[]; };
+layout(std430, binding = 1) readonly buffer PositiveBuffer { float positive[]; };
+layout(std430, binding = 2) readonly buffer NegativeBuffer { float negative[]; };
+layout(push_constant) uniform Push {
+    uint n;
+    float dt;
+    float cfg;
+    uint use_zero_star;
+} pc;
+shared float s_dot[256];
+shared float s_norm[256];
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    float p = i < pc.n ? positive[i] : 0.0;
+    float n = i < pc.n ? negative[i] : 0.0;
+    s_dot[i] = p * n;
+    s_norm[i] = n * n;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (i < stride) {
+            s_dot[i] += s_dot[i + stride];
+            s_norm[i] += s_norm[i + stride];
+        }
+        barrier();
+    }
+    float scale = pc.use_zero_star != 0u ? s_dot[0] / (s_norm[0] + 1.0e-8) : 1.0;
+    if (i < pc.n) {
+        // Exact UnifiedCFM CFG-Zero* form:
+        // negative * scale + cfg * (positive - negative * scale)
+        float guided = n * scale + pc.cfg * (p - n * scale);
+        x[i] -= pc.dt * guided;
+    }
+}

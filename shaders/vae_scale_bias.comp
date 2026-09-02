@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=256,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Model { uint model_words[]; };
+layout(set=0,binding=1,std430) buffer Values { float values[]; };
+layout(push_constant) uniform Push { uint scale_offset; uint bias_offset; uint channels; uint elem_count; uint bucket; uint buckets; uint scale_dtype; uint bias_dtype; } pc;
+float load_f16(uint byte_offset){uint word=model_words[byte_offset>>2u];vec2 h=unpackHalf2x16(word);return((byte_offset&2u)==0u)?h.x:h.y;}
+float load_f32(uint byte_offset){return uintBitsToFloat(model_words[byte_offset>>2u]);}
+float load_model(uint base,uint index,uint dtype){return dtype==1u?load_f16(base+index*2u):load_f32(base+index*4u);}
+void main(){
+    uint t=gl_GlobalInvocationID.x;
+    uint c=gl_GlobalInvocationID.y;
+    if(t>=pc.elem_count || c>=pc.channels)return;
+    uint i=c*pc.elem_count+t;
+    uint idx=pc.bucket*pc.channels+c;
+    float scale=load_model(pc.scale_offset,idx,pc.scale_dtype);
+    float bias=load_model(pc.bias_offset,idx,pc.bias_dtype);
+    values[i]=values[i]*scale+bias;
+}

@@ -1,0 +1,24 @@
+#version 460
+
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer KeyBuffer { float k[]; } k_buf;
+layout(set = 0, binding = 1, std430) readonly buffer ValueBuffer { float v[]; } v_buf;
+layout(set = 0, binding = 2, std430) buffer KeyCache { uint words[]; } k_cache;
+layout(set = 0, binding = 3, std430) buffer ValueCache { uint words[]; } v_cache;
+
+layout(push_constant) uniform Push {
+    uint layer;
+    uint position;
+    uint context;
+    uint kv_dim;
+} pc;
+
+void main() {
+    uint word_i = gl_LocalInvocationID.x;
+    uint words_per_token = pc.kv_dim / 2u;
+    if (word_i >= words_per_token) return;
+    uint d = word_i * 2u;
+    uint dst = (pc.layer * pc.context + pc.position) * words_per_token + word_i;
+    k_cache.words[dst] = packHalf2x16(vec2(k_buf.k[d], k_buf.k[d + 1u]));
+    v_cache.words[dst] = packHalf2x16(vec2(v_buf.v[d], v_buf.v[d + 1u]));
+}

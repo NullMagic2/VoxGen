@@ -1,0 +1,5 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=256)in;layout(set=0,binding=0,std430)readonly buffer M{uint w[];}m;layout(set=0,binding=1,std430)readonly buffer I{float x[];}i;layout(set=0,binding=2,std430)writeonly buffer O{float y[];}o;layout(push_constant)uniform Push{uint weight_offset;uint n;float eps;}pc;shared float waves[8];shared float invr;float f32(uint a){return uintBitsToFloat(m.w[a>>2u]);}float red(float v){float w=subgroupAdd(v);if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){float q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:0.0;q=subgroupAdd(q);if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}void main(){uint lane=gl_LocalInvocationID.x;float s=0.0;for(uint k=lane;k<pc.n;k+=256u){float v=i.x[k];s+=v*v;}float total=red(s);if(lane==0u)invr=inversesqrt(total/float(pc.n)+pc.eps);barrier();for(uint k=lane;k<pc.n;k+=256u)o.y[k]=i.x[k]*invr*f32(pc.weight_offset+k*4u);}

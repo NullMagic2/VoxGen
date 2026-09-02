@@ -1,0 +1,8 @@
+#version 460
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Model{uint w[];} model;
+layout(set=0,binding=1,std430) buffer Q{float q[];} qb;
+layout(set=0,binding=2,std430) buffer K{float k[];} kb;
+layout(push_constant) uniform Push{uint factor_offset;uint tokens;uint q_heads;uint kv_heads;uint head_dim;uint q_stride;uint k_stride;float rope_theta;float scaling_factor;}pc;
+float f32_at(uint o){return uintBitsToFloat(model.w[o>>2u]);}
+void main(){uint lane=gl_LocalInvocationID.x,head=gl_WorkGroupID.x,tok=gl_WorkGroupID.y;uint half_dim=pc.head_dim/2u;if(lane>=half_dim||tok>=pc.tokens||head>=pc.q_heads+pc.kv_heads)return;float factor=f32_at(pc.factor_offset+lane*4u);float theta=float(tok)/(pow(pc.rope_theta,float(2u*lane)/float(pc.head_dim))*factor);float c=cos(theta)*pc.scaling_factor,s=sin(theta)*pc.scaling_factor;if(head<pc.q_heads){uint b=tok*pc.q_stride+head*pc.head_dim;float a=qb.q[b+lane],d=qb.q[b+lane+half_dim];qb.q[b+lane]=a*c-d*s;qb.q[b+lane+half_dim]=d*c+a*s;}else{uint kh=head-pc.q_heads,b=tok*pc.k_stride+kh*pc.head_dim;float a=kb.k[b+lane],d=kb.k[b+lane+half_dim];kb.k[b+lane]=a*c-d*s;kb.k[b+lane+half_dim]=d*c+a*s;}}

@@ -1,0 +1,17 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer ModelBuffer{uint model_words[];} model_buf;
+layout(set=0,binding=1,std430) readonly buffer InputBuffer{float x[];} in_buf;
+layout(set=0,binding=2,std430) writeonly buffer OutputBuffer{float y[];} out_buf;
+layout(push_constant) uniform Push{uint weight_offset;uint rows;uint cols;uint dtype;uint row_base;float alpha;}pc;
+shared float waves[8];
+uint load_u8(uint o){uint v=model_buf.model_words[o>>2u];return(v>>((o&3u)*8u))&255u;}
+float f16_at(uint o){uint v=model_buf.model_words[o>>2u];uint b=(v>>((o&2u)*8u))&65535u;return unpackHalf2x16(b).x;}
+float reduce_sum(float v){float w=subgroupAdd(v);if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){float q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:0.0;q=subgroupAdd(q);if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}
+void main(){uint lane=gl_LocalInvocationID.x,row=pc.row_base+gl_WorkGroupID.x;if(row>=pc.rows)return;float s=0.0;
+ if(pc.dtype==1u){uint rb=pc.weight_offset+row*pc.cols*2u;for(uint c=lane*4u;c<pc.cols;c+=1024u){vec2 w01=unpackHalf2x16(model_buf.model_words[(rb+c*2u)>>2u]);vec2 w23=unpackHalf2x16(model_buf.model_words[(rb+c*2u+4u)>>2u]);s+=w01.x*in_buf.x[c];if(c+1u<pc.cols)s+=w01.y*in_buf.x[c+1u];if(c+2u<pc.cols)s+=w23.x*in_buf.x[c+2u];if(c+3u<pc.cols)s+=w23.y*in_buf.x[c+3u];}}
+ else {uint blocks=pc.cols/32u;for(uint c=lane*4u;c<pc.cols;c+=1024u){uint base=pc.weight_offset+(row*blocks+c/32u)*34u;float d=f16_at(base);uint qoff=base+2u+(c&31u);uint r0=load_u8(qoff),r1=load_u8(qoff+1u),r2=load_u8(qoff+2u),r3=load_u8(qoff+3u);int q0=r0<128u?int(r0):int(r0)-256,q1=r1<128u?int(r1):int(r1)-256,q2=r2<128u?int(r2):int(r2)-256,q3=r3<128u?int(r3):int(r3)-256;s+=d*(float(q0)*in_buf.x[c]+float(q1)*in_buf.x[c+1u]+float(q2)*in_buf.x[c+2u]+float(q3)*in_buf.x[c+3u]);}}
+ float total=reduce_sum(s);if(lane==0u)out_buf.y[row]=total*pc.alpha;}

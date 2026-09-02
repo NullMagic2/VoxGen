@@ -1,0 +1,6 @@
+#version 460
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) buffer Gate{float g[];}gb;
+layout(set=0,binding=1,std430) readonly buffer Up{float u[];}ub;
+layout(push_constant) uniform Push{uint n;}pc;
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=pc.n)return;float x=gb.g[i];gb.g[i]=(x/(1.0+exp(-x)))*ub.u[i];}

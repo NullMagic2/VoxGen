@@ -1,0 +1,15 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Model { uint w[]; } model;
+layout(set=0,binding=1,std430) readonly buffer Input { float x[]; } input_buf;
+layout(set=0,binding=2,std430) writeonly buffer Q { float y[]; } q_buf;
+layout(set=0,binding=3,std430) writeonly buffer K { float y[]; } k_buf;
+layout(set=0,binding=4,std430) writeonly buffer V { float y[]; } v_buf;
+layout(push_constant) uniform Push {uint q_weight_offset;uint k_weight_offset;uint v_weight_offset;uint q_rows;uint kv_rows;uint cols;uint tokens;uint input_stride;uint q_stride;uint kv_stride;uint input_base;} pc;
+shared float waves[8];
+float f16_at(uint o){uint v=model.w[o>>2u];return unpackHalf2x16((v>>((o&2u)*8u))&65535u).x;}
+float red(float v){float w=subgroupAdd(v);if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){float q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:0.0;q=subgroupAdd(q);if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}
+void main(){uint lane=gl_LocalInvocationID.x,combined=gl_WorkGroupID.x,tok=gl_WorkGroupID.y;uint total=pc.q_rows+2u*pc.kv_rows;if(combined>=total||tok>=pc.tokens)return;uint off,row,target;if(combined<pc.q_rows){off=pc.q_weight_offset;row=combined;target=0u;}else if(combined<pc.q_rows+pc.kv_rows){off=pc.k_weight_offset;row=combined-pc.q_rows;target=1u;}else{off=pc.v_weight_offset;row=combined-pc.q_rows-pc.kv_rows;target=2u;}uint ib=pc.input_base+tok*pc.input_stride,rb=off+row*pc.cols*2u;float s=0.0;for(uint c=lane*4u;c<pc.cols;c+=1024u){vec2 w01=unpackHalf2x16(model.w[(rb+c*2u)>>2u]);vec2 w23=unpackHalf2x16(model.w[(rb+c*2u+4u)>>2u]);s+=w01.x*input_buf.x[ib+c];if(c+1u<pc.cols)s+=w01.y*input_buf.x[ib+c+1u];if(c+2u<pc.cols)s+=w23.x*input_buf.x[ib+c+2u];if(c+3u<pc.cols)s+=w23.y*input_buf.x[ib+c+3u];}float total_sum=red(s);if(lane==0u){if(target==0u)q_buf.y[tok*pc.q_stride+row]=total_sum;else if(target==1u)k_buf.y[tok*pc.kv_stride+row]=total_sum;else v_buf.y[tok*pc.kv_stride+row]=total_sum;}}

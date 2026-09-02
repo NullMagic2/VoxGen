@@ -1,0 +1,32 @@
+#version 460
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// RX 7900 XTX Q/K/V projection: one dispatch, wave32 subgroup reduction.
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer ModelBuffer { uint model_words[]; } model_buf;
+layout(set=0,binding=1,std430) readonly buffer InputBuffer { float x[]; } in_buf;
+layout(set=0,binding=2,std430) writeonly buffer QBuffer { float y[]; } q_buf;
+layout(set=0,binding=3,std430) writeonly buffer KBuffer { float y[]; } k_buf;
+layout(set=0,binding=4,std430) writeonly buffer VBuffer { float y[]; } v_buf;
+layout(push_constant) uniform Push {
+    uint q_weight_offset; uint k_weight_offset; uint v_weight_offset;
+    uint q_rows; uint kv_rows; uint cols;
+    uint q_dtype; uint k_dtype; uint v_dtype; uint row_base;
+} pc;
+shared float waves[8];
+uint load_u8(uint o){uint v=model_buf.model_words[o>>2u];return(v>>((o&3u)*8u))&255u;}
+float f16_at(uint o){uint v=model_buf.model_words[o>>2u];uint b=(v>>((o&2u)*8u))&65535u;return unpackHalf2x16(b).x;}
+float reduce_sum(float v){float w=subgroupAdd(v);if(gl_SubgroupInvocationID==0u)waves[gl_SubgroupID]=w;barrier();if(gl_SubgroupID==0u){float q=gl_SubgroupInvocationID<gl_NumSubgroups?waves[gl_SubgroupInvocationID]:0.0;q=subgroupAdd(q);if(gl_SubgroupInvocationID==0u)waves[0]=q;}barrier();return waves[0];}
+void main(){
+    uint lane=gl_LocalInvocationID.x, combined=pc.row_base+gl_WorkGroupID.x;
+    uint total=pc.q_rows+2u*pc.kv_rows; if(combined>=total)return;
+    uint off,dtype,row,target;
+    if(combined<pc.q_rows){off=pc.q_weight_offset;dtype=pc.q_dtype;row=combined;target=0u;}
+    else if(combined<pc.q_rows+pc.kv_rows){off=pc.k_weight_offset;dtype=pc.k_dtype;row=combined-pc.q_rows;target=1u;}
+    else{off=pc.v_weight_offset;dtype=pc.v_dtype;row=combined-pc.q_rows-pc.kv_rows;target=2u;}
+    float s=0.0;
+    if(dtype==1u){uint rb=off+row*pc.cols*2u;for(uint c=lane*4u;c<pc.cols;c+=1024u){vec2 w01=unpackHalf2x16(model_buf.model_words[(rb+c*2u)>>2u]);vec2 w23=unpackHalf2x16(model_buf.model_words[(rb+c*2u+4u)>>2u]);s+=w01.x*in_buf.x[c];if(c+1u<pc.cols)s+=w01.y*in_buf.x[c+1u];if(c+2u<pc.cols)s+=w23.x*in_buf.x[c+2u];if(c+3u<pc.cols)s+=w23.y*in_buf.x[c+3u];}}
+    else{uint blocks=pc.cols/32u;for(uint c=lane*4u;c<pc.cols;c+=1024u){uint base=off+(row*blocks+c/32u)*34u;float d=f16_at(base);uint qo=base+2u+(c&31u);uint r0=load_u8(qo),r1=load_u8(qo+1u),r2=load_u8(qo+2u),r3=load_u8(qo+3u);int q0=r0<128u?int(r0):int(r0)-256,q1=r1<128u?int(r1):int(r1)-256,q2=r2<128u?int(r2):int(r2)-256,q3=r3<128u?int(r3):int(r3)-256;s+=d*(float(q0)*in_buf.x[c]+float(q1)*in_buf.x[c+1u]+float(q2)*in_buf.x[c+2u]+float(q3)*in_buf.x[c+3u]);}}
+    float total_sum=reduce_sum(s);if(lane==0u){if(target==0u)q_buf.y[row]=total_sum;else if(target==1u)k_buf.y[row]=total_sum;else v_buf.y[row]=total_sum;}
+}

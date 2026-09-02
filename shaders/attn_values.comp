@@ -1,0 +1,37 @@
+#version 460
+
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer ScoreBuffer { float scores[]; } score_buf;
+layout(set = 0, binding = 1, std430) readonly buffer ValueCache { uint words[]; } v_cache;
+layout(set = 0, binding = 2, std430) writeonly buffer AttentionBuffer { float out_values[]; } out_buf;
+
+layout(push_constant) uniform Push {
+    uint layer;
+    uint context;
+    uint position;
+    uint head_dim;
+    uint q_per_kv;
+    uint kv_heads;
+} pc;
+
+float load_cache(uint layer, uint pos, uint dim) {
+    uint kv_dim = pc.kv_heads * pc.head_dim;
+    uint words_per_token = kv_dim / 2u;
+    uint word_i = (layer * pc.context + pos) * words_per_token + dim / 2u;
+    vec2 pair = unpackHalf2x16(v_cache.words[word_i]);
+    return (dim & 1u) == 0u ? pair.x : pair.y;
+}
+
+void main() {
+    uint d = gl_LocalInvocationID.x;
+    uint qh = gl_WorkGroupID.x;
+    if (d >= pc.head_dim) return;
+    uint kvh = qh / pc.q_per_kv;
+    uint kv_dim_index = kvh * pc.head_dim + d;
+    float acc = 0.0;
+    for (uint t = 0u; t <= pc.position; ++t) {
+        float p = score_buf.scores[qh * pc.context + t];
+        acc += p * load_cache(pc.layer, t, kv_dim_index);
+    }
+    out_buf.out_values[qh * pc.head_dim + d] = acc;
+}

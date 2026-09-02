@@ -1,0 +1,78 @@
+#version 460
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer ModelBuffer { uint model_words[]; } model_buf;
+layout(set = 0, binding = 1, std430) readonly buffer LeftBuffer { float left_values[]; } left_buf;
+layout(set = 0, binding = 2, std430) readonly buffer RightBuffer { float right_values[]; } right_buf;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputBuffer { float y[]; } out_buf;
+layout(set = 0, binding = 4, std430) writeonly buffer SnapshotBuffer { float y[]; } snapshot_buf;
+
+layout(push_constant) uniform Push {
+    uint weight_offset;
+    uint bias_offset;
+    uint rows;
+    uint left_cols;
+    uint right_cols;
+    uint weight_dtype;
+    uint bias_dtype;
+    uint row_base;
+} pc;
+
+shared float partial[256];
+
+uint load_u8(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 3u) * 8u;
+    return (word >> shift) & 0xffu;
+}
+float load_f16(uint byte_offset) {
+    uint word = model_buf.model_words[byte_offset >> 2u];
+    uint shift = (byte_offset & 2u) * 8u;
+    uint bits = (word >> shift) & 0xffffu;
+    return unpackHalf2x16(bits).x;
+}
+float load_f32(uint byte_offset) {
+    return uintBitsToFloat(model_buf.model_words[byte_offset >> 2u]);
+}
+float load_scalar(uint byte_offset, uint dtype) {
+    return dtype == 0u ? load_f32(byte_offset) : load_f16(byte_offset);
+}
+float load_weight(uint row, uint col, uint cols) {
+    if (pc.weight_dtype == 0u) {
+        return load_f32(pc.weight_offset + (row * cols + col) * 4u);
+    }
+    if (pc.weight_dtype == 1u) {
+        return load_f16(pc.weight_offset + (row * cols + col) * 2u);
+    }
+    uint blocks_per_row = cols / 32u;
+    uint block = row * blocks_per_row + col / 32u;
+    uint base = pc.weight_offset + block * 34u;
+    float d = load_f16(base);
+    uint raw = load_u8(base + 2u + (col & 31u));
+    int q = raw < 128u ? int(raw) : int(raw) - 256;
+    return d * float(q);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint row = pc.row_base + gl_WorkGroupID.x;
+    if (row >= pc.rows) return;
+    uint cols = pc.left_cols + pc.right_cols;
+    float sum = 0.0;
+    for (uint col = lane; col < cols; col += 256u) {
+        float x = col < pc.left_cols ? left_buf.left_values[col] : right_buf.right_values[col - pc.left_cols];
+        sum += load_weight(row, col, cols) * x;
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) {
+        float bias = load_scalar(pc.bias_offset + row * (pc.bias_dtype == 0u ? 4u : 2u), pc.bias_dtype);
+        float value = partial[0] + bias;
+        out_buf.y[row] = value;
+        snapshot_buf.y[row] = value;
+    }
+}

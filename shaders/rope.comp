@@ -1,0 +1,51 @@
+#version 460
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer ModelBuffer { uint model_words[]; } model_buf;
+layout(set = 0, binding = 1, std430) buffer QueryBuffer { float q[]; } q_buf;
+layout(set = 0, binding = 2, std430) buffer KeyBuffer { float k[]; } k_buf;
+
+layout(push_constant) uniform Push {
+    uint factor_offset;
+    uint position;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    float rope_theta;
+    float scaling_factor;
+} pc;
+
+float load_f32(uint byte_offset) {
+    return uintBitsToFloat(model_buf.model_words[byte_offset >> 2u]);
+}
+
+void main() {
+    uint pair = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint half_dim = pc.head_dim / 2u;
+    if (pair >= half_dim) return;
+
+    float ext = load_f32(pc.factor_offset + pair * 4u);
+    float exponent = float(pair * 2u) / float(pc.head_dim);
+    float inv_freq = 1.0 / pow(pc.rope_theta, exponent);
+    float angle = float(pc.position) * inv_freq / ext;
+    float c = cos(angle) * pc.scaling_factor;
+    float s = sin(angle) * pc.scaling_factor;
+
+    if (head < pc.q_heads) {
+        uint base = head * pc.head_dim;
+        float a = q_buf.q[base + pair];
+        float b = q_buf.q[base + pair + half_dim];
+        q_buf.q[base + pair] = a * c - b * s;
+        q_buf.q[base + pair + half_dim] = b * c + a * s;
+    } else {
+        uint kh = head - pc.q_heads;
+        if (kh < pc.kv_heads) {
+            uint base = kh * pc.head_dim;
+            float a = k_buf.k[base + pair];
+            float b = k_buf.k[base + pair + half_dim];
+            k_buf.k[base + pair] = a * c - b * s;
+            k_buf.k[base + pair + half_dim] = b * c + a * s;
+        }
+    }
+}

@@ -1,0 +1,37 @@
+#version 460
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) buffer XBuffer { float x[]; };
+layout(push_constant) uniform Push {
+    uint n;
+    uint seed_lo;
+    uint seed_hi;
+    float temperature;
+} pc;
+
+uint mix32(uint v) {
+    v ^= v >> 16;
+    v *= 0x7feb352du;
+    v ^= v >> 15;
+    v *= 0x846ca68bu;
+    v ^= v >> 16;
+    return v;
+}
+
+float u01(uint v) {
+    // Strictly inside (0,1), so Box-Muller never sees log(0).
+    return (float(v) + 0.5) * (1.0 / 4294967296.0);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    uint pair = i >> 1;
+    uint a = mix32(pair ^ pc.seed_lo ^ 0x9e3779b9u);
+    uint b = mix32(pair ^ pc.seed_hi ^ 0x85ebca6bu);
+    float u1 = max(u01(a), 1.0e-7);
+    float u2 = u01(b);
+    float r = sqrt(-2.0 * log(u1));
+    float theta = 6.28318530717958647692 * u2;
+    float z = ((i & 1u) == 0u) ? r * cos(theta) : r * sin(theta);
+    x[i] = z * pc.temperature;
+}

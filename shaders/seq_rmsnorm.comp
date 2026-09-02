@@ -1,0 +1,9 @@
+#version 460
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Model{uint w[];} model;
+layout(set=0,binding=1,std430) readonly buffer Input{float x[];} input_buf;
+layout(set=0,binding=2,std430) writeonly buffer Output{float y[];} output_buf;
+layout(push_constant) uniform Push{uint weight_offset; uint n; uint tokens; uint input_stride; uint output_stride; uint input_base; uint output_base; float eps;} pc;
+shared float p[256]; shared float invr;
+float f32_at(uint o){return uintBitsToFloat(model.w[o>>2u]);}
+void main(){uint lane=gl_LocalInvocationID.x,t=gl_WorkGroupID.x;if(t>=pc.tokens)return;uint ib=pc.input_base+t*pc.input_stride,ob=pc.output_base+t*pc.output_stride;float s=0.0;for(uint i=lane;i<pc.n;i+=256u){float v=input_buf.x[ib+i];s+=v*v;}p[lane]=s;barrier();for(uint st=128u;st>0u;st>>=1u){if(lane<st)p[lane]+=p[lane+st];barrier();}if(lane==0u)invr=inversesqrt(p[0]/float(pc.n)+pc.eps);barrier();for(uint i=lane;i<pc.n;i+=256u)output_buf.y[ob+i]=input_buf.x[ib+i]*invr*f32_at(pc.weight_offset+i*4u);}
