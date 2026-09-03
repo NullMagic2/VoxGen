@@ -56,7 +56,6 @@ The result is a runtime that can be optimized around the actual characteristics 
 
 VoxGen is written in **Rust** and does not require Python, PyTorch, Triton, or a virtual environment at runtime.
 
->>>>>>> d3a356093549d448059802583d38098cdfa92366
 This provides a much simpler deployment model:
 
 ```text
