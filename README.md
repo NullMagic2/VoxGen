@@ -4,6 +4,7 @@
 
 VoxGen reimplements the VoxCPM2 inference path as a native Rust/Vulkan runtime instead of relying on the standard Python/PyTorch stack. The goal is simple: make high-quality local speech synthesis faster, leaner, easier to deploy, and especially well optimized for AMD hardware.
 
+<<<<<<< HEAD
 ## Why VoxGen?
 
 Most modern TTS runtimes are designed around Python and CUDA-first machine-learning frameworks. VoxGen takes a different approach.
@@ -28,6 +29,35 @@ The result is a runtime that can be optimized around the actual characteristics 
 
 VoxGen is written in **Rust** and does not require Python, PyTorch, Triton, or a virtual environment at runtime.
 
+=======
+<img width="2132" height="1540" alt="image" src="https://github.com/user-attachments/assets/45f3fc40-46a8-4bd7-b745-4112137a3cae" />
+VoxGen demo.
+
+## Why VoxGen?
+
+Most modern TTS runtimes are designed around Python and CUDA-first machine-learning frameworks. VoxGen takes a different approach.
+
+It is designed as a **native inference engine** with explicit control over:
+
+- GPU memory allocation
+- Vulkan compute pipelines
+- shader specialization
+- synchronization and barriers
+- streaming behavior
+- low-latency PCM delivery
+- voice-reference caching
+- cancellation
+- hardware-specific tuning
+
+The result is a runtime that can be optimized around the actual characteristics of the target GPU instead of depending on general-purpose framework behavior.
+
+## Key goals
+
+### Lightweight native runtime
+
+VoxGen is written in **Rust** and does not require Python, PyTorch, Triton, or a virtual environment at runtime.
+
+>>>>>>> d3a356093549d448059802583d38098cdfa92366
 This provides a much simpler deployment model:
 
 ```text
