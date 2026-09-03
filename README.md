@@ -4,7 +4,6 @@
 
 VoxGen reimplements the VoxCPM2 inference path as a native Rust/Vulkan runtime instead of relying on the standard Python/PyTorch stack. The goal is simple: make high-quality local speech synthesis faster, leaner, easier to deploy, and especially well optimized for AMD hardware.
 
-<<<<<<< HEAD
 ## Why VoxGen?
 
 Most modern TTS runtimes are designed around Python and CUDA-first machine-learning frameworks. VoxGen takes a different approach.
