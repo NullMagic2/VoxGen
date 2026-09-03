@@ -1,5 +1,10 @@
 # VoxGen wxDragon demo
 
+## Cleaning downloaded/build files (v0.7.39)
+
+Run `clean_source.bat` on Windows or `./clean_source.sh` on Linux from this `demo/` folder. The wrapper invokes the project-level cleaner, so both the demo and engine trees are cleaned together while their final debug/release binaries are preserved. Project-local `models/`, download/cache directories, Cargo build intermediates, generated smoke-test outputs, and generated lockfiles are removed. Global Cargo caches and model directories outside the VoxGen source tree are never touched.
+
+
 This is a deliberately small native desktop front end for VoxGen.
 
 ## UI
@@ -28,11 +33,19 @@ Controls:
 - **Word spacing (ms)** — numeric 0–100 ms control, default 30 ms. It extends only short low-energy gaps likely to be between words;
 - **Speed (%)** — live 50–200% tempo control, default 100%;
 - **Pitch (semitones)** — live -12 to +12 semitone control, default 0;
-- **Gain (%)** — 0–400% request gain, default 140%;
+- **Gain (%)** — 0–400% request gain, default 100%;
 - **Speak** — synthesize and play the lower-box text. The typed text remains in the box after synthesis;
 - **Stop** — immediately flush queued playback and cancel the active speech request. GPU generation stops cooperatively after the current safe acoustic-patch/GPU operation completes.
 
 The demo uses VoxGen's public model-lifecycle and speech APIs. It does not contain another inference implementation.
+
+### Streaming fidelity / anger artifact mitigation (v0.7.38)
+
+- The compatibility rolling AudioVAE decoder now retains at least 6 latent patches of context, even if an older client requests only 3 or 4.
+- This avoids repeatedly replacing required causal history with zero-padding, which can sound brittle, metallic, or cracked on highly expressive speech.
+- Fresh demo gain now starts at 100% rather than 140%.
+- Angry style recipes use controlled tension, timing, and phrase-level emphasis instead of continuous loudness/shouting.
+
 
 ### Mid-generation Stop (v0.7.37)
 

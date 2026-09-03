@@ -10,8 +10,8 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.37"' in root_cargo, 'root version')
-need('version = "0.7.37"' in cargo, 'demo version')
+need('version = "0.7.39"' in root_cargo, 'root version')
+need('version = "0.7.39"' in cargo, 'demo version')
 need('rust-version = "1.87"' in cargo, 'WSOLA dependency MSRV')
 need('wsola = "0.1.0"' in cargo, 'speech WSOLA dependency')
 need('pitch_shift' not in cargo, 'old phase-vocoder dependency removed')

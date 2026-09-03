@@ -10,7 +10,7 @@ def need(cond, msg):
         raise AssertionError(msg)
 
 root_scripts = sorted(p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in {'.bat', '.sh'})
-need(root_scripts == ['build_voxgen.bat', 'build_voxgen.sh'], f'root scripts must be masters only: {root_scripts}')
+need(root_scripts == ['build_voxgen.bat', 'build_voxgen.sh', 'clean_source.bat', 'clean_source.sh'], f'root scripts must be master build/clean entry points only: {root_scripts}')
 need((win / 'build_voxgen.bat').exists(), 'missing Windows platform build script')
 need((lin / 'build_voxgen.sh').exists(), 'missing Linux platform build script')
 need((win / '_common.bat').exists(), 'missing Windows common script')
@@ -27,7 +27,7 @@ for p in win.glob('*.bat'):
         need('c:\\software\\voxcpm-q8\\models' not in text, f'{p.name}: model path should come from _common.bat')
 
 bash = os.environ.get('BASH', 'bash')
-for p in [root / 'build_voxgen.sh', *sorted(lin.glob('*.sh'))]:
+for p in [root / 'build_voxgen.sh', root / 'clean_source.sh', root / 'demo' / 'clean_source.sh', *sorted(lin.glob('*.sh'))]:
     need(os.access(p, os.X_OK), f'{p}: not executable')
     need(p.read_text().startswith('#!/usr/bin/env bash'), f'{p}: missing portable bash shebang')
     proc = subprocess.run([bash, '-n', str(p)], capture_output=True, text=True)

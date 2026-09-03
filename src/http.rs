@@ -344,7 +344,7 @@ fn options(runtime: &Runtime, r: &SpeechRequest) -> TtsOptions {
     TtsOptions {
         min_steps: r.min_steps.unwrap_or(2),
         max_steps: r.max_steps.unwrap_or(200),
-        streaming_prefix_len: r.streaming_prefix_len.unwrap_or(4),
+        streaming_prefix_len: r.streaming_prefix_len.unwrap_or(6),
         cfm: CfmOptions {
             n_timesteps: r.inference_timesteps.unwrap_or(10),
             cfg_value: r.cfg_value.unwrap_or(cfg),

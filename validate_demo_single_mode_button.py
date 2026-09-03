@@ -7,8 +7,8 @@ demo_cargo=(root/'demo/Cargo.toml').read_text()
 def need(cond,msg):
     if not cond: raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.37"' in root_cargo, 'root version')
-need('version = "0.7.37"' in demo_cargo, 'demo version')
+need('version = "0.7.39"' in root_cargo, 'root version')
+need('version = "0.7.39"' in demo_cargo, 'demo version')
 need('with_label("Load VoxCPM2")' in src, 'single model/mode button label')
 need('with_label("Apply mode + reload")' not in src, 'second mode button removed')
 need('apply_mode_button' not in src, 'second mode button handler removed')

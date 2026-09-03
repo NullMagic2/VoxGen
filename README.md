@@ -1,3 +1,13 @@
+
+## v0.7.39 clean-source scripts
+
+VoxGen now includes `clean_source.bat` (Windows) and `clean_source.sh` (Linux) at the project root. Running either cleaner removes engine/demo Cargo build intermediates, project-local downloaded model/cache folders, generated smoke-test outputs, and Cargo lockfiles while preserving any final `voxgen` / `voxgen.exe` and `voxgen-demo` / `voxgen-demo.exe` binaries found under the debug or release target directories. The cleaner is deliberately project-local: it never deletes the global Cargo cache or model paths outside the VoxGen tree. Matching wrappers are also included under `demo/`, so the same cleanup can be launched from either the engine root or demo folder.
+
+## v0.7.38 streaming-fidelity update
+
+VoxGen now protects the compatibility rolling AudioVAE stream decoder from undersized context windows. The current decoder topology needs six latent patches of causal context for the newest 160 ms chunk, so values below six are raised internally to six. This specifically targets brittle, metallic, or cracking artifacts that become conspicuous in highly expressive/high-energy speech. Fresh demo settings also start at 100% gain rather than 140%, and the built-in angry recipes emphasize controlled phrase-level tension instead of continuous loudness.
+
+The longer-term target remains a fully stateful AudioVAE streaming path with cached convolution state.
 # VoxGen v0.7.36 — neutral voice anchor
 
 VoxGen is a standalone Rust/Vulkan inference engine specialized for **VoxCPM2**. Version 0.7.36 changes reference fallback behavior so a configured Neutral WAV remains the canonical speaker identity whenever a style-specific clip is unavailable. It preserves the v0.7.35 low-latency streaming startup work and the v0.7.34/v0.7.33 power-efficiency kernels.

@@ -9,7 +9,7 @@ def need(cond, msg):
         raise AssertionError(msg)
 
 need(demo.is_dir(), "missing demo directory")
-for rel in ["Cargo.toml", "README.md", "src/main.rs", "build_demo.bat", "run_demo.bat", "build_demo.sh", "run_demo.sh"]:
+for rel in ["Cargo.toml", "README.md", "src/main.rs", "build_demo.bat", "run_demo.bat", "build_demo.sh", "run_demo.sh", "clean_source.bat", "clean_source.sh"]:
     need((demo / rel).is_file(), f"missing demo/{rel}")
 
 cargo = (demo / "Cargo.toml").read_text()
@@ -59,7 +59,7 @@ need("SizerFlag::None" not in src, "invalid SizerFlag::None")
 need("event.event.skip" not in src, "outdated WindowEventData field access")
 need("event.skip(true)" in src, "close event propagation")
 need("input.clear()" not in src, "successful synthesis must preserve the user's input text")
-need("const DEFAULT_GAIN_PERCENT: u32 = 140" in src, "configurable playback gain default")
+need("const DEFAULT_GAIN_PERCENT: u32 = 100" in src, "configurable playback gain default")
 need("const DEMO_ONSET_FADE_SAMPLES: usize = 1_440" in src, "30-ms onset fade")
 need("const DEFAULT_WORD_SPACING_MS: u32 = 30" in src, "default word spacing")
 need(".with_range(0, 100)" in src, "word spacing range")
@@ -117,7 +117,7 @@ def delimiters(text, name):
 
 delimiters(src, "demo/src/main.rs")
 
-for sh in [demo / "build_demo.sh", demo / "run_demo.sh"]:
+for sh in [demo / "build_demo.sh", demo / "run_demo.sh", demo / "clean_source.sh"]:
     need(os.access(sh, os.X_OK), f"{sh.name} not executable")
     proc = subprocess.run(["bash", "-n", str(sh)], capture_output=True, text=True)
     need(proc.returncode == 0, f"{sh.name}: {proc.stderr.strip()}")
@@ -125,5 +125,5 @@ for sh in [demo / "build_demo.sh", demo / "run_demo.sh"]:
 # Root stays clean: platform-specific VoxGen scripts remain in their folders;
 # demo launchers are intentionally scoped to demo/.
 root_scripts=sorted(p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in {'.bat','.sh'})
-need(root_scripts == ['build_voxgen.bat','build_voxgen.sh'], f"unexpected root scripts {root_scripts}")
+need(root_scripts == ['build_voxgen.bat','build_voxgen.sh','clean_source.bat','clean_source.sh'], f"unexpected root scripts {root_scripts}")
 print("wxDragon demo static validation OK")

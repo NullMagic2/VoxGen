@@ -5,7 +5,7 @@ text = src.read_text(encoding="utf-8")
 root_cargo = (Path(__file__).with_name("Cargo.toml")).read_text(encoding="utf-8")
 demo_cargo = (Path(__file__).with_name("demo") / "Cargo.toml").read_text(encoding="utf-8")
 checks = {
-    "root/demo version 0.7.37": 'version = "0.7.37"' in root_cargo and 'version = "0.7.37"' in demo_cargo,
+    "root/demo version 0.7.37": 'version = "0.7.39"' in root_cargo and 'version = "0.7.39"' in demo_cargo,
     "bounded WinMM live queue": "STREAM_MAX_PENDING_BLOCKS" in text and "wait_for_live_capacity" in text,
     "wait occurs before live DSP render": text.find("player.wait_for_live_capacity();") < text.find("let rendered = realtime.push(&paced, live_controls);"),
     "processor tracks prior speed": "last_speed_percent" in text,

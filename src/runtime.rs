@@ -21,6 +21,11 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Minimum rolling decoder history needed by VoxGen's current compatibility
+/// AudioVAE streaming path. The newest 160 ms output patch depends on 24
+/// latent frames = six 4-frame acoustic patches.
+const MIN_STREAMING_DECODE_CONTEXT_PATCHES: usize = 6;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryPlan {
     pub baselm_gguf_data_bytes: u64,
@@ -728,9 +733,13 @@ impl Runtime {
         if cancelled() { bail!("speech synthesis cancelled"); }
         let (prompt_stats,prompt)=if let Some(p)=prompt_wav{let(st,v)=self.audiovae_encode_wav_patches_cached(p,AudioPadSide::Left)?;(Some(st),v)}else{(None,Vec::new())};
         let _=(ref_stats,prompt_stats); // retained by diagnostics in the individual VAE APIs.
-        // Upstream streaming/full decode seeds AudioVAE with the last prompt patches so the
-        // first generated waveform chunk has causal decoder context, then trims that context.
-        let prefix_keep=options.streaming_prefix_len.saturating_sub(1).min(prompt.len());
+        // VoxGen's current streaming AudioVAE path is a rolling compatibility decoder,
+        // not a state-cached decoder. Its causal receptive field reaches 24 latent frames
+        // (six 4-frame patches) into the rolling input for the newest output patch.
+        // Honor larger caller windows, but never allow a smaller window to erase required
+        // decoder history and replace it with artificial left zero-padding.
+        let decode_context_patches=options.streaming_prefix_len.max(MIN_STREAMING_DECODE_CONTEXT_PATCHES);
+        let prefix_keep=decode_context_patches.saturating_sub(1).min(prompt.len());
         let decode_prefix=prompt[prompt.len().saturating_sub(prefix_keep)..].to_vec();
         let plan=conditioning::build_plan(&text_tokens,&reference,&prompt)?;
         let conditioning_summary=plan.summary.clone();
@@ -748,7 +757,7 @@ impl Runtime {
             generated.push(patch.clone());
             let mut emitted=0usize;
             if on_pcm.is_some(){
-                let mut context:Vec<&Vec<f32>>=decode_prefix.iter().chain(generated.iter()).collect(); if context.len()>options.streaming_prefix_len{context.drain(..context.len()-options.streaming_prefix_len);}
+                let mut context:Vec<&Vec<f32>>=decode_prefix.iter().chain(generated.iter()).collect(); if context.len()>decode_context_patches{context.drain(..context.len()-decode_context_patches);}
                 let mut rolling=Vec::with_capacity(context.len()*256);for p in context{rolling.extend_from_slice(p);}
                 let (_ds,pcm)=self.audiovae_decode_latents(&rolling)?; let take=7680.min(pcm.len()); let chunk=&pcm[pcm.len()-take..]; emitted=chunk.len();
                 // The stop head decides whether another patch is needed; it cannot

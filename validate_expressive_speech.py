@@ -12,8 +12,8 @@ readme=(root/'README.md').read_text()
 def need(c,m):
     if not c: raise AssertionError(m)
 
-need('version = "0.7.37"' in root_cargo,'root version')
-need('version = "0.7.37"' in demo_cargo,'demo version')
+need('version = "0.7.39"' in root_cargo,'root version')
+need('version = "0.7.39"' in demo_cargo,'demo version')
 
 # Native VoxCPM2 textual control, without rewriting the user's target text.
 for token in [
@@ -60,7 +60,7 @@ for token in [
     'natural phrase-level variation in emphasis and emotion rather than a fixed tone',
     'enthusiasm rising on important phrases without shouting',
     'becoming gently reassuring',
-    'avoiding a constant shouted delivery',
+    'moderate loudness rather than a constant shouted delivery',
     'Custom instruction:',
 ]: need(token in demo, f'demo style control: {token}')
 

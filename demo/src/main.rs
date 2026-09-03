@@ -33,7 +33,7 @@ const SERVER_ADDR: &str = "127.0.0.1:8091";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 // Preserve the previous demo loudness as the portable default, but route it
 // through VoxGen's explicit gain control instead of hard-coding playback boost.
-const DEFAULT_GAIN_PERCENT: u32 = 140;
+const DEFAULT_GAIN_PERCENT: u32 = 100;
 const MIN_GAIN_PERCENT: u32 = 0;
 const MAX_GAIN_PERCENT: u32 = 400;
 // A short fade suppresses the one-shot/reference onset chirp reported by
@@ -166,9 +166,9 @@ fn build_style_control(preset: &str, intensity: &str, custom: &str) -> Option<St
             _ => format!("quietly concerned at first, becoming gently reassuring where the wording allows, {natural}"),
         },
         "angry" => match intensity {
-            "subtle" => format!("controlled irritation, firm and tense but not aggressive, {natural}"),
-            "strong" => format!("genuinely angry and forceful, controlled enough to remain intelligible, with emphasis concentrated on key words, {natural}"),
-            _ => format!("firm, frustrated and clearly angry, avoiding a constant shouted delivery, {natural}"),
+            "subtle" => format!("restrained irritation, firm and clipped but still natural, moderate loudness, with tension carried by timing and emphasis rather than shouting, {natural}"),
+            "strong" => format!("strong controlled anger, tense and forceful with short bursts of emphasis on key words, clean and intelligible rather than screamed or continuously loud, {natural}"),
+            _ => format!("clearly angry but controlled, tense and direct, with sharper phrase-level emphasis and moderate loudness rather than a constant shouted delivery, {natural}"),
         },
         "gentle" => match intensity {
             "subtle" => format!("slightly softer and gentler than normal, calm and conversational, {natural}"),
@@ -2185,7 +2185,7 @@ fn speech_stream_windows(
     }
     let mut request = speech_request_json(text, voice_sample, gain, seed, expressive)?;
     request["request_id"] = json!(request_id);
-    request["streaming_prefix_len"] = json!(4);
+    request["streaming_prefix_len"] = json!(6);
     let body = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     let mut player = WaveOutPlayer::new(cancel.clone())?;
     let mut spacing = WordSpacingProcessor::new(word_spacing_ms, 48_000);
@@ -4422,7 +4422,7 @@ fn main() {
                         }
                         Err(err) => {
                             append_log(output, &format!("Engine/model startup error: {err}"));
-                            append_log(output, "Select model paths after starting VoxGen v0.7.37 manually, or fix the error and reopen the demo.");
+                            append_log(output, "Select model paths after starting VoxGen v0.7.39 manually, or fix the error and reopen the demo.");
                         }
                     }
                     base_button.enable(true);

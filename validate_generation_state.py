@@ -25,7 +25,7 @@ need('predict_stop_from_current_lm' in rt,
 predict = rt[rt.index('pub fn predict_stop'):rt.index('pub fn advance_generated_patch')]
 need('base.output_buffer()' not in predict, 'synthesis stop predictor still uses raw BaseLM output')
 # Current upstream default is 4.
-need('streaming_prefix_len: r.streaming_prefix_len.unwrap_or(4)' in http,
+need('streaming_prefix_len: r.streaming_prefix_len.unwrap_or(6)' in http,
      'HTTP streaming prefix default must be 4')
 # Diagnostics to distinguish early stop from decoder problems on hardware.
 for h in ['X-VoxGen-Generated-Patches','X-VoxGen-Stopped-By-Predictor','X-VoxGen-Audio-Seconds','X-VoxGen-RTF']:

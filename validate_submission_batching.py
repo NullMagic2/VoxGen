@@ -27,7 +27,7 @@ errors=[]
 def need(cond,msg):
     if not cond: errors.append(msg)
 
-need('version = "0.7.37"' in cargo, 'Cargo version is not 0.7.13')
+need('version = "0.7.39"' in cargo, 'Cargo version is not 0.7.13')
 need('submit_fence: Mutex<vk::Fence>' in vulkan, 'persistent submit fence missing')
 sub=body(vulkan,'submit_and_wait')
 need('create_fence' not in sub and 'destroy_fence' not in sub, 'submit_and_wait still allocates/destroys fences')

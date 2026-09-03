@@ -10,7 +10,7 @@ def need(cond,msg):
 def text(rel): return (ROOT/rel).read_text(encoding='utf-8')
 
 root_cargo=text('Cargo.toml'); demo_cargo=text('demo/Cargo.toml')
-need('version = "0.7.37"' in root_cargo and 'version = "0.7.37"' in demo_cargo, 'root/demo version 0.7.37')
+need('version = "0.7.39"' in root_cargo and 'version = "0.7.39"' in demo_cargo, 'root/demo version 0.7.37')
 
 base=text('src/baselm.rs'); acoustic=text('src/acoustic.rs'); local=text('src/local.rs'); vk=text('src/vulkan.rs')
 qkv=text('shaders/qkv_matvec.comp'); qkvx=text('shaders/qkv_matvec_xtx7900.comp')

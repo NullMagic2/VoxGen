@@ -1,6 +1,6 @@
 [package]
 name = "voxgen"
-version = "0.7.37"
+version = "0.7.39"
 edition = "2021"
 rust-version = "1.78"
 description = "VoxGen: specialized VoxCPM2 Vulkan inference engine"

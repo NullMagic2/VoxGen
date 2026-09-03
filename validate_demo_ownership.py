@@ -9,7 +9,7 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.37"' in cargo, 'demo version')
+need('version = "0.7.39"' in cargo, 'demo version')
 needle = 'let speak_live_playback_controls = live_playback_controls.clone();'
 need(needle in src, 'Speak callback does not get a pre-move controls clone')
 
