@@ -28,7 +28,6 @@ The result is a runtime that can be optimized around the actual characteristics 
 
 VoxGen is written in **Rust** and does not require Python, PyTorch, Triton, or a virtual environment at runtime.
 
-=======
 <img width="2132" height="1540" alt="image" src="https://github.com/user-attachments/assets/45f3fc40-46a8-4bd7-b745-4112137a3cae" />
 VoxGen demo.
 
