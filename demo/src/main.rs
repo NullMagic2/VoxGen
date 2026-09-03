@@ -1,4 +1,9 @@
-use wsola::TimeStretch;
+use voxgen::{
+    playback_dsp::{OutputPeakGuard, PlaybackControls as NativePlaybackControls, StreamingPlaybackDsp},
+    prosody_control::{
+        apply_managed_cfg, build_style_control, managed_style_tuning, refine_control_instruction,
+    },
+};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -62,9 +67,6 @@ const DSP_SAMPLE_RATE: u32 = 48_000;
 // Keep at most this many already-rendered live blocks pending in WinMM.
 // This bounds how long a previous speed setting can remain audible after a live change.
 const STREAM_MAX_PENDING_BLOCKS: usize = 2;
-const DSP_PULL_CHUNK: usize = 16_384;
-const RESAMPLER_HALF_TAPS: usize = 12; // 24-tap Lanczos-windowed sinc
-const DSP_TRANSITION_SAMPLES: usize = 480; // 10 ms at 48 kHz
 // At normal/slow playback speed, start from the first 160-ms patch: the first
 // audible response matters more than stockpiling an extra patch before WinMM.
 // Faster playback still raises the reserve because it consumes PCM more quickly.
@@ -129,75 +131,6 @@ fn update_emotion_sample_button(button: &Button, panel: &Panel, selection: Optio
     panel.layout();
 }
 
-fn build_style_control(preset: &str, intensity: &str, custom: &str) -> Option<String> {
-    if preset == "auto" {
-        return None;
-    }
-    let natural = "with natural phrase-level variation in emphasis and emotion rather than a fixed tone";
-    let prompt = match preset {
-        "neutral" => match intensity {
-            "subtle" => format!("natural and conversational, emotionally restrained, {natural}"),
-            "strong" => format!("clear, composed and deliberately neutral, but still human and expressive, {natural}"),
-            _ => format!("natural, conversational and emotionally balanced, {natural}"),
-        },
-        "warm" => match intensity {
-            "subtle" => format!("slightly warm and friendly, conversational, with a subtle smile, {natural}"),
-            "strong" => format!("very warm, affectionate and welcoming, genuinely pleased, {natural}"),
-            _ => format!("warm and friendly, conversational, gently smiling, {natural}"),
-        },
-        "cheerful" => match intensity {
-            "subtle" => format!("lightly cheerful and optimistic, relaxed and conversational, {natural}"),
-            "strong" => format!("very cheerful and lively, clearly delighted but still natural, {natural}"),
-            _ => format!("cheerful and warm, naturally expressive and upbeat, {natural}"),
-        },
-        "excited" => match intensity {
-            "subtle" => format!("pleasantly surprised, gradually becoming more animated, {natural}"),
-            "strong" => format!("genuinely excited and energetic, enthusiasm rising on important phrases without shouting, {natural}"),
-            _ => format!("excited and energetic, with believable changes in enthusiasm across the sentence, {natural}"),
-        },
-        "sad" => match intensity {
-            "subtle" => format!("slightly subdued and reflective, speaking a little more softly, {natural}"),
-            "strong" => format!("deeply saddened and reflective, emotionally affected but restrained rather than theatrical, {natural}"),
-            _ => format!("subdued and reflective, speaking softly with restrained sadness, {natural}"),
-        },
-        "concerned" => match intensity {
-            "subtle" => format!("slightly concerned and attentive, becoming gently reassuring where the wording allows, {natural}"),
-            "strong" => format!("clearly worried at first, emotionally attentive, becoming reassuring when appropriate, {natural}"),
-            _ => format!("quietly concerned at first, becoming gently reassuring where the wording allows, {natural}"),
-        },
-        "angry" => match intensity {
-            "subtle" => format!("restrained irritation, firm and clipped but still natural, moderate loudness, with tension carried by timing and emphasis rather than shouting, {natural}"),
-            "strong" => format!("strong controlled anger, tense and forceful with short bursts of emphasis on key words, clean and intelligible rather than screamed or continuously loud, {natural}"),
-            _ => format!("clearly angry but controlled, tense and direct, with sharper phrase-level emphasis and moderate loudness rather than a constant shouted delivery, {natural}"),
-        },
-        "gentle" => match intensity {
-            "subtle" => format!("slightly softer and gentler than normal, calm and conversational, {natural}"),
-            "strong" => format!("very gentle, tender and soothing, softly expressive rather than flat, {natural}"),
-            _ => format!("gentle, calm and reassuring, softly expressive, {natural}"),
-        },
-        "serious" => match intensity {
-            "subtle" => format!("slightly serious and focused, measured but conversational, {natural}"),
-            "strong" => format!("grave, authoritative and focused, measured without becoming monotone, {natural}"),
-            _ => format!("serious, composed and focused, with measured emphasis, {natural}"),
-        },
-        "whisper" => match intensity {
-            "subtle" => format!("soft, intimate and breathy, close to a whisper while remaining clear, {natural}"),
-            "strong" => format!("very soft and whisper-like, intimate and breathy but still intelligible, {natural}"),
-            _ => format!("whisper-like, soft and intimate, breathy but intelligible, {natural}"),
-        },
-        "custom" => {
-            let custom = custom.trim();
-            if custom.is_empty() { return None; }
-            match intensity {
-                "subtle" => format!("{custom}; keep the effect subtle and restrained; {natural}"),
-                "strong" => format!("{custom}; make the requested delivery clearly perceptible but still believable; {natural}"),
-                _ => format!("{custom}; keep the delivery natural and believable; {natural}"),
-            }
-        }
-        _ => return None,
-    };
-    Some(prompt)
-}
 
 #[derive(Debug, Clone)]
 struct DemoSettings {
@@ -501,321 +434,57 @@ impl SynthesisCancel {
     }
 }
 
-/// Streaming band-limited resampler used only for pitch transposition.
+/// Thin demo adapter over VoxGen's authoritative native playback DSP.
 ///
-/// A pitch factor `p` advances the source position by `p` samples per output
-/// sample.  The WSOLA stage then uses tempo `speed / p`, restoring the desired
-/// duration while leaving the transposed pitch intact. A compact Lanczos-windowed
-/// sinc kernel avoids the high-frequency roughness of linear interpolation and
-/// applies an anti-alias cutoff when pitching upward (downsampling).
-struct StreamingSincResampler {
-    buffer: Vec<f32>,
-    position: f64,
-    factor: f64,
-}
-
-impl StreamingSincResampler {
-    fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            position: 0.0,
-            factor: 1.0,
-        }
-    }
-
-    fn set_factor(&mut self, factor: f32) {
-        if factor.is_finite() && factor > 0.0 {
-            self.factor = (factor as f64).clamp(0.5, 2.0);
-        }
-    }
-
-    #[inline]
-    fn sinc(x: f64) -> f64 {
-        if x.abs() < 1.0e-12 {
-            1.0
-        } else {
-            let px = std::f64::consts::PI * x;
-            px.sin() / px
-        }
-    }
-
-    fn sample_at(&self, index: isize, draining: bool) -> f32 {
-        if self.buffer.is_empty() {
-            return 0.0;
-        }
-        if index < 0 {
-            // Repeat the first sample at startup rather than introducing a zero
-            // discontinuity before the first real sample.
-            return self.buffer[0];
-        }
-        let index = index as usize;
-        if index < self.buffer.len() {
-            self.buffer[index]
-        } else if draining {
-            0.0
-        } else {
-            // Normal processing never asks beyond the available look-ahead.
-            self.buffer[self.buffer.len() - 1]
-        }
-    }
-
-    fn interpolate(&self, position: f64, draining: bool) -> f32 {
-        let center = position.floor() as isize;
-        let half = RESAMPLER_HALF_TAPS as isize;
-        // When factor > 1 we are downsampling, so shrink the low-pass cutoff to
-        // prevent frequencies above the new Nyquist limit from aliasing.
-        let cutoff = (1.0 / self.factor.max(1.0)).min(1.0);
-        let mut sum = 0.0f64;
-        let mut weight_sum = 0.0f64;
-        for index in (center - half + 1)..=(center + half) {
-            let distance = position - index as f64;
-            let window_x = distance / RESAMPLER_HALF_TAPS as f64;
-            if window_x.abs() >= 1.0 {
-                continue;
-            }
-            let weight = cutoff
-                * Self::sinc(distance * cutoff)
-                * Self::sinc(window_x);
-            sum += self.sample_at(index, draining) as f64 * weight;
-            weight_sum += weight;
-        }
-        let sample = if weight_sum.abs() > 1.0e-12 {
-            (sum / weight_sum) as f32
-        } else {
-            0.0
-        };
-        if sample.is_finite() { sample } else { 0.0 }
-    }
-
-    fn compact(&mut self) {
-        let consumed = self.position.floor().max(0.0) as usize;
-        // Retain enough history for the left half of the sinc kernel.
-        let retain = RESAMPLER_HALF_TAPS + 2;
-        let drain = consumed.saturating_sub(retain).min(self.buffer.len());
-        if drain > 0 {
-            self.buffer.drain(..drain);
-            self.position -= drain as f64;
-        }
-    }
-
-    fn produce(&mut self, draining: bool) -> Vec<f32> {
-        let mut out = Vec::new();
-        if self.buffer.is_empty() {
-            return out;
-        }
-        loop {
-            let can_emit = if draining {
-                self.position < self.buffer.len() as f64
-            } else {
-                let needed = self.position.floor().max(0.0) as usize + RESAMPLER_HALF_TAPS;
-                needed < self.buffer.len()
-            };
-            if !can_emit {
-                break;
-            }
-            out.push(self.interpolate(self.position, draining));
-            self.position += self.factor;
-        }
-        self.compact();
-        out
-    }
-
-    fn push(&mut self, input: &[f32]) -> Vec<f32> {
-        self.buffer.extend(input.iter().map(|&sample| {
-            if sample.is_finite() { sample } else { 0.0 }
-        }));
-        self.produce(false)
-    }
-
-    fn flush(&mut self) -> Vec<f32> {
-        let out = self.produce(true);
-        self.buffer.clear();
-        self.position = 0.0;
-        out
-    }
-}
-
-/// Stateful real-time pitch/tempo processor tuned for speech.
-///
-/// The previous 1024-point phase vocoder was low latency but gave speech a
-/// metallic/underwater quality as soon as speed or pitch moved away from the
-/// neutral setting.  This path instead uses WSOLA (30 ms speech windows with
-/// waveform-similarity alignment) for time scaling. Pitch shifting is produced
-/// by band-limited resampling plus compensating WSOLA:
-///
-///     pitch_factor = 2^(semitones/12)
-///     resampler rate = pitch_factor
-///     WSOLA tempo    = speed / pitch_factor
-///
-/// Therefore the final duration is controlled only by Speed, while Pitch changes
-/// the fundamental frequency independently. At exactly 100% / 0 semitones the
-/// original PCM is still returned bit-for-bit; the DSP graph is kept warm so a
-/// live adjustment can engage without a long startup gap.
+/// The algorithm itself lives in the engine crate (`src/playback_dsp.rs`) so the
+/// desktop demo and HTTP clients cannot drift into different speed/pitch math.
 struct RealtimeVoiceProcessor {
-    resampler: StreamingSincResampler,
-    stretcher: TimeStretch,
-    effect_was_active: bool,
-    last_speed_percent: u32,
-    last_pitch_semitones: i32,
+    dsp: StreamingPlaybackDsp,
+    peak_guard: OutputPeakGuard,
 }
 
 impl RealtimeVoiceProcessor {
     fn new() -> Self {
+        let controls = NativePlaybackControls::new(
+            DEFAULT_SPEED_PERCENT as f32,
+            DEFAULT_PITCH_SEMITONES as f32,
+        ).expect("fixed VoxGen playback controls must be valid");
         Self {
-            resampler: StreamingSincResampler::new(),
-            stretcher: TimeStretch::new(DSP_SAMPLE_RATE, 1)
-                .expect("fixed VoxGen WSOLA configuration must be valid"),
-            effect_was_active: false,
-            last_speed_percent: DEFAULT_SPEED_PERCENT,
-            last_pitch_semitones: DEFAULT_PITCH_SEMITONES,
+            dsp: StreamingPlaybackDsp::new(DSP_SAMPLE_RATE, controls)
+                .expect("fixed VoxGen native playback DSP configuration must be valid"),
+            peak_guard: OutputPeakGuard::new(DSP_SAMPLE_RATE)
+                .expect("fixed VoxGen output peak guard configuration must be valid"),
         }
     }
 
-    fn reset_for_live_rate_change(&mut self, speed_percent: u32, pitch_semitones: i32) {
-        // WSOLA carries overlap/search history which was created for the old tempo.
-        // Reusing that history after a live rate change can make the old tempo
-        // persist for subsequent chunks. Start a fresh short-history processor so
-        // the next not-yet-rendered PCM observes the new controls immediately.
-        self.stretcher = TimeStretch::new(DSP_SAMPLE_RATE, 1)
-            .expect("fixed VoxGen WSOLA configuration must be valid");
-        if pitch_semitones != self.last_pitch_semitones {
-            // Pitch changes alter the resampler phase/rate as well, so do not carry
-            // fractional source position from the previous transposition factor.
-            self.resampler = StreamingSincResampler::new();
-        }
-        self.effect_was_active = false;
-        self.last_speed_percent = speed_percent;
-        self.last_pitch_semitones = pitch_semitones;
-    }
-
-    fn pitch_factor(pitch_semitones: i32) -> f32 {
-        2.0_f32.powf(pitch_semitones as f32 / 12.0)
-    }
-
-    fn rates(controls: &LivePlaybackControls) -> (f32, f32, bool) {
-        let speed = controls.speed_percent() as f32 / 100.0;
-        let pitch = controls.pitch_semitones();
-        let pitch_factor = Self::pitch_factor(pitch);
-        let wsola_tempo = (speed / pitch_factor).clamp(0.25, 4.0);
-        let active = controls.speed_percent() != DEFAULT_SPEED_PERCENT
-            || pitch != DEFAULT_PITCH_SEMITONES;
-        (pitch_factor, wsola_tempo, active)
-    }
-
-    fn pull_ready(&mut self) -> Vec<f32> {
-        let mut out = Vec::new();
-        loop {
-            let chunk = self.stretcher.pull(DSP_PULL_CHUNK);
-            if chunk.is_empty() {
-                break;
-            }
-            out.extend(chunk.into_iter().map(|sample| {
-                if sample.is_finite() { sample } else { 0.0 }
-            }));
-        }
-        out
-    }
-
-    fn resized_dry(input: &[f32], len: usize) -> Vec<f32> {
-        if len == 0 || input.is_empty() {
-            return Vec::new();
-        }
-        if len == input.len() {
-            return input.to_vec();
-        }
-        if len == 1 {
-            return vec![input[0]];
-        }
-        let mut out = Vec::with_capacity(len);
-        let scale = (input.len() - 1) as f64 / (len - 1) as f64;
-        for i in 0..len {
-            let pos = i as f64 * scale;
-            let lo = pos.floor() as usize;
-            let hi = (lo + 1).min(input.len() - 1);
-            let frac = (pos - lo as f64) as f32;
-            out.push(input[lo] + (input[hi] - input[lo]) * frac);
-        }
-        out
-    }
-
-    fn crossfade_in(processed: &mut [f32], dry: &[f32]) {
-        let n = DSP_TRANSITION_SAMPLES.min(processed.len()).min(dry.len());
-        if n == 0 {
-            return;
-        }
-        for i in 0..n {
-            let alpha = (i + 1) as f32 / n as f32;
-            processed[i] = dry[i] * (1.0 - alpha) + processed[i] * alpha;
-        }
+    fn sync_controls(&mut self, controls: &LivePlaybackControls) {
+        let native = NativePlaybackControls::new(
+            controls.speed_percent() as f32,
+            controls.pitch_semitones() as f32,
+        ).expect("demo sliders clamp to VoxGen native DSP limits");
+        self.dsp
+            .set_controls(native)
+            .expect("VoxGen native playback DSP control update must be valid");
     }
 
     fn push(&mut self, input: &[f32], controls: &LivePlaybackControls) -> Vec<f32> {
-        let clean = input.iter().map(|&sample| {
-            if sample.is_finite() { sample } else { 0.0 }
-        }).collect::<Vec<_>>();
-        if clean.is_empty() {
-            return Vec::new();
-        }
-
-        let speed_percent = controls.speed_percent();
-        let pitch_semitones = controls.pitch_semitones();
-        if speed_percent != self.last_speed_percent || pitch_semitones != self.last_pitch_semitones {
-            self.reset_for_live_rate_change(speed_percent, pitch_semitones);
-        }
-        let (pitch_factor, wsola_tempo, active) = Self::rates(controls);
-        self.resampler.set_factor(pitch_factor);
-        self.stretcher.set_tempo(wsola_tempo);
-        let transposed = self.resampler.push(&clean);
-        if !transposed.is_empty() {
-            self.stretcher.push(&transposed);
-        }
-        let mut processed = self.pull_ready();
-
-        let out = if active {
-            if !self.effect_was_active && !processed.is_empty() {
-                // A short time-domain transition hides the small alignment offset
-                // between the dry path and WSOLA when a live control is engaged.
-                let dry = Self::resized_dry(&clean, processed.len());
-                Self::crossfade_in(&mut processed, &dry);
-            }
-            processed
-        } else {
-            // Keep the processor current but bypass it at neutral settings so the
-            // default VoxGen waveform remains completely uncolored.
-            if self.effect_was_active && !processed.is_empty() {
-                let n = DSP_TRANSITION_SAMPLES.min(clean.len()).min(processed.len());
-                let mut dry = clean.clone();
-                for i in 0..n {
-                    let alpha = (i + 1) as f32 / n as f32;
-                    dry[i] = processed[i] * (1.0 - alpha) + dry[i] * alpha;
-                }
-                dry
-            } else {
-                clean
-            }
-        };
-        self.effect_was_active = active;
-        out
+        self.sync_controls(controls);
+        let rendered = self.dsp
+            .push(input)
+            .expect("VoxGen native playback DSP stream processing failed");
+        self.peak_guard
+            .process(&rendered, 1.0)
+            .expect("VoxGen output peak guard failed")
     }
 
     fn finish(&mut self, controls: &LivePlaybackControls) -> Vec<f32> {
-        let (_, wsola_tempo, active) = Self::rates(controls);
-        self.stretcher.set_tempo(wsola_tempo);
-        let tail = self.resampler.flush();
-        if !tail.is_empty() {
-            self.stretcher.push(&tail);
-        }
-        let mut out = self.pull_ready();
-        out.extend(self.stretcher.flush().into_iter().map(|sample| {
-            if sample.is_finite() { sample } else { 0.0 }
-        }));
-        if active {
-            out
-        } else {
-            // Neutral samples were already emitted through the dry bypass. The
-            // warm DSP tail is intentionally discarded to avoid duplicate audio.
-            Vec::new()
-        }
+        self.sync_controls(controls);
+        let rendered = self.dsp
+            .finish()
+            .expect("VoxGen native playback DSP flush failed");
+        self.peak_guard
+            .process(&rendered, 1.0)
+            .expect("VoxGen output peak guard failed")
     }
 }
 
@@ -1748,9 +1417,58 @@ struct ExpressiveRequest {
     control: Option<String>,
     clone_mode: String,
     prompt_text: String,
+    base_cfg_value: f32,
     cfg_value: f32,
+    managed_gain_multiplier: f32,
     temperature: f32,
     inference_timesteps: u32,
+}
+
+impl ExpressiveRequest {
+    fn effective_gain(&self, base_gain: f32) -> f32 {
+        (base_gain * self.managed_gain_multiplier).clamp(0.0, MAX_GAIN_PERCENT as f32 / 100.0)
+    }
+}
+
+fn build_demo_expressive_request(
+    text: &str,
+    preset: &str,
+    intensity: &str,
+    custom: &str,
+    clone_mode: String,
+    prompt_text: String,
+    base_cfg_value: f32,
+    temperature: f32,
+    inference_timesteps: u32,
+) -> ExpressiveRequest {
+    let raw_control = if clone_mode == "ultimate" {
+        None
+    } else {
+        build_style_control(preset, intensity, custom)
+    };
+    let tuning = managed_style_tuning(raw_control.as_deref());
+    // Resolve the exact control text in the demo using the same engine-owned
+    // compiler used by Runtime. Sending the resolved form makes the log and the
+    // actual tokenized instruction identical; Runtime leaves the resolved custom
+    // text untouched because the managed legacy marker is no longer present.
+    let control = raw_control
+        .as_deref()
+        .map(|raw| refine_control_instruction(raw, text));
+    let cfg_value = if clone_mode == "ultimate" {
+        base_cfg_value
+    } else {
+        apply_managed_cfg(base_cfg_value, raw_control.as_deref())
+    };
+    ExpressiveRequest {
+        control,
+        clone_mode,
+        prompt_text,
+        base_cfg_value,
+        cfg_value,
+        managed_gain_multiplier: tuning.demo_gain_multiplier,
+        temperature,
+        inference_timesteps,
+    }
 }
 
 fn speech_request_json(
@@ -1760,11 +1478,12 @@ fn speech_request_json(
     seed: u64,
     expressive: &ExpressiveRequest,
 ) -> Result<serde_json::Value, String> {
+    let effective_gain = expressive.effective_gain(gain);
     let mut request = json!({
         "input": text,
         "response_format": "wav",
         "seed": seed,
-        "gain": gain,
+        "gain": effective_gain,
         "cfg_value": expressive.cfg_value,
         "temperature": expressive.temperature,
         "inference_timesteps": expressive.inference_timesteps,
@@ -2782,8 +2501,8 @@ fn append_ab_results(
         sample.map(|p| p.display().to_string()).unwrap_or_else(|| "none (zero-shot)".to_string())
     ));
     append_log(log, &format!(
-        "Inference settings: clone={}, CFG {:.2}, temperature {:.2}, CFM steps {}",
-        expressive.clone_mode, expressive.cfg_value, expressive.temperature, expressive.inference_timesteps
+        "Inference settings: clone={}, CFG {:.2} (base {:.2}), temperature {:.2}, CFM steps {}",
+        expressive.clone_mode, expressive.cfg_value, expressive.base_cfg_value, expressive.temperature, expressive.inference_timesteps
     ));
     for case in [normal, xtx] {
         let label = if case.mode == "xtx7900" { "XTX 7900" } else { "Normal" };
@@ -2842,8 +2561,8 @@ fn append_gpu_profile_results(
         sample.map(|p| p.display().to_string()).unwrap_or_else(|| "none (zero-shot)".to_string())
     ));
     append_log(log, &format!(
-        "Inference settings: clone={}, CFG {:.2}, temperature {:.2}, CFM steps {}",
-        expressive.clone_mode, expressive.cfg_value, expressive.temperature, expressive.inference_timesteps
+        "Inference settings: clone={}, CFG {:.2} (base {:.2}), temperature {:.2}, CFM steps {}",
+        expressive.clone_mode, expressive.cfg_value, expressive.base_cfg_value, expressive.temperature, expressive.inference_timesteps
     ));
     append_log(log, &format!("Profiled wall time: {wall_seconds:.3} s (offline; timestamp readback intentionally enabled)"));
     if let Some(rtf) = speech.rtf { append_log(log, &format!("Profiled RTF: {rtf:.3} (do not compare directly with stream-safe RTF)")); }
@@ -2933,7 +2652,7 @@ fn synthesize(
         append_log(log, "No reference sample selected: using zero-shot generation.");
     }
     if let Some(control) = expressive.control.as_deref() {
-        append_log(log, &format!("Style control: {control}"));
+        append_log(log, &format!("Style control (effective): {control}"));
     } else if expressive.clone_mode == "ultimate" {
         append_log(log, "Style control: inherited from Ultimate-cloning prompt audio.");
     } else {
@@ -2947,17 +2666,35 @@ fn synthesize(
         expressive.inference_timesteps,
         variations,
     ));
+    if (expressive.cfg_value - expressive.base_cfg_value).abs() > 0.0005 {
+        append_log(log, &format!(
+            "Managed style guidance: base CFG {:.2} -> effective {:.2} ({:+.2}).",
+            expressive.base_cfg_value,
+            expressive.cfg_value,
+            expressive.cfg_value - expressive.base_cfg_value,
+        ));
+    }
     if word_spacing_ms > 0 {
         append_log(log, &format!("Pacing: extending detected short word gaps by +{word_spacing_ms} ms."));
     }
+    let base_gain = gain_percent as f32 / 100.0;
+    let effective_gain = expressive.effective_gain(base_gain);
     append_log(log, &format!(
         "Playback: stream {}, speed {}%, pitch {:+} semitones, gain {:.2}x{}.",
         if stream_enabled { "on" } else { "off" },
         live_controls.speed_percent(),
         live_controls.pitch_semitones(),
-        gain_percent as f32 / 100.0,
+        effective_gain,
         if stream_enabled { " (speed/pitch adjustable while streaming)" } else { "" },
     ));
+    if (expressive.managed_gain_multiplier - 1.0).abs() > 0.0005 {
+        append_log(log, &format!(
+            "Managed style level: base gain {:.2}x -> effective {:.2}x ({:+.0}%).",
+            base_gain,
+            effective_gain,
+            (expressive.managed_gain_multiplier - 1.0) * 100.0,
+        ));
+    }
 
     let variations = variations.clamp(1, MAX_VARIATIONS);
 
@@ -3890,11 +3627,13 @@ fn main() {
                     append_log(output, "Ultimate cloning requires the exact transcript of the reference audio.");
                     return;
                 }
-                let control = if clone_mode == "ultimate" { None } else { build_style_control(&preset, &intensity, &custom) };
-                let cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
+                let base_cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
                 let temperature = temperature_control_copy.value().clamp(50, 150) as f32 / 100.0;
                 let inference_timesteps = timesteps_control_copy.value().clamp(4, 30) as u32;
-                let mut expressive = ExpressiveRequest { control, clone_mode, prompt_text, cfg_value, temperature, inference_timesteps };
+                let mut expressive = build_demo_expressive_request(
+                    &text, &preset, &intensity, &custom, clone_mode, prompt_text,
+                    base_cfg_value, temperature, inference_timesteps,
+                );
                 let runtime_voice_sample = state.lock().ok().and_then(|guard| guard.voice_sample.clone());
                 let (stream_enabled, settings_snapshot) = match settings.lock() {
                     Ok(cfg) => (cfg.stream, cfg.clone()),
@@ -4023,11 +3762,13 @@ fn main() {
                     append_log(output, "Ultimate cloning requires the exact transcript of the reference audio.");
                     return;
                 }
-                let control = if clone_mode == "ultimate" { None } else { build_style_control(&preset, &intensity, &custom) };
-                let cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
+                let base_cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
                 let temperature = temperature_control_copy.value().clamp(50, 150) as f32 / 100.0;
                 let inference_timesteps = timesteps_control_copy.value().clamp(4, 30) as u32;
-                let mut expressive = ExpressiveRequest { control, clone_mode, prompt_text, cfg_value, temperature, inference_timesteps };
+                let mut expressive = build_demo_expressive_request(
+                    &text, &preset, &intensity, &custom, clone_mode, prompt_text,
+                    base_cfg_value, temperature, inference_timesteps,
+                );
                 let runtime_voice_sample = state.lock().ok().and_then(|guard| guard.voice_sample.clone());
                 let (stream_enabled, settings_snapshot) = match settings.lock() {
                     Ok(cfg) => (cfg.stream, cfg.clone()),
@@ -4223,7 +3964,6 @@ fn main() {
                     prompt_text_control_copy.set_focus();
                     return;
                 }
-                let control = if clone_mode == "ultimate" { None } else { build_style_control(&preset, &intensity, &custom) };
                 let word_spacing_ms = word_spacing_control_copy.value().clamp(0, 100) as u32;
                 let gain_percent = gain_control_copy.value().clamp(MIN_GAIN_PERCENT as i32, MAX_GAIN_PERCENT as i32) as u32;
                 let variations = variations_control_copy.value().clamp(1, MAX_VARIATIONS as i32) as u32;
@@ -4262,14 +4002,17 @@ fn main() {
                 };
                 if let Some(message) = resolved_reference.describe(&preset) { append_log(output, &message); }
                 let sample_override = resolved_reference.path;
-                let expressive = ExpressiveRequest {
-                    control,
+                let expressive = build_demo_expressive_request(
+                    &text,
+                    &preset,
+                    &intensity,
+                    &custom,
                     clone_mode,
                     prompt_text,
-                    cfg_value: cfg_percent as f32 / 100.0,
-                    temperature: temperature_percent as f32 / 100.0,
+                    cfg_percent as f32 / 100.0,
+                    temperature_percent as f32 / 100.0,
                     inference_timesteps,
-                };
+                );
                 synthesize(
                     text,
                     Arc::clone(&state),
@@ -4422,7 +4165,7 @@ fn main() {
                         }
                         Err(err) => {
                             append_log(output, &format!("Engine/model startup error: {err}"));
-                            append_log(output, "Select model paths after starting VoxGen v0.7.39 manually, or fix the error and reopen the demo.");
+                            append_log(output, "Select model paths after starting VoxGen v0.7.40 manually, or fix the error and reopen the demo.");
                         }
                     }
                     base_button.enable(true);

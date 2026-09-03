@@ -4,19 +4,21 @@ root = Path(__file__).resolve().parent
 demo = root / 'demo'
 src = (demo / 'src/main.rs').read_text()
 cargo = (demo / 'Cargo.toml').read_text()
+engine_cargo = (root / 'Cargo.toml').read_text()
+dsp = (root / 'src/playback_dsp.rs').read_text()
 root_cargo = (root / 'Cargo.toml').read_text()
 
 def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.39"' in root_cargo, 'root version')
-need('version = "0.7.39"' in cargo, 'demo version')
+need('version = "0.7.55"' in root_cargo, 'root version')
+need('version = "0.7.55"' in cargo, 'demo version')
 need('rust-version = "1.87"' in cargo, 'WSOLA dependency MSRV')
-need('wsola = "0.1.0"' in cargo, 'speech WSOLA dependency')
-need('pitch_shift' not in cargo, 'old phase-vocoder dependency removed')
+need('wsola = "0.1.0"' not in engine_cargo, 'generic WSOLA dependency removed')
+need('wsola = "0.1.0"' not in cargo, 'demo no longer owns WSOLA dependency')
+need('pitch_shift' not in cargo and 'pitch_shift' not in engine_cargo, 'old phase-vocoder dependency removed')
 for token in [
-    'use wsola::TimeStretch;',
     'struct LivePlaybackControls',
     'AtomicU32', 'AtomicI32',
     'DEFAULT_SPEED_PERCENT: u32 = 100',
@@ -25,11 +27,7 @@ for token in [
     'DEFAULT_PITCH_SEMITONES: i32 = 0',
     'MIN_PITCH_SEMITONES: i32 = -12',
     'MAX_PITCH_SEMITONES: i32 = 12',
-    'struct StreamingSincResampler',
-    'RESAMPLER_HALF_TAPS: usize = 12',
     'struct RealtimeVoiceProcessor',
-    'TimeStretch::new(DSP_SAMPLE_RATE, 1)',
-    'let wsola_tempo = (speed / pitch_factor).clamp(0.25, 4.0);',
     'with_label("Speed (%):")',
     'with_label("Pitch (semitones):")',
     '"Live while speaking"',
@@ -41,10 +39,15 @@ for token in [
     'realtime.finish(live_controls)',
     'adjustable while streaming',
 ]:
-    need(token in src, f'missing {token}')
+    need(token in src, f'missing demo control token {token}')
+
+for token in ['struct SpeechWsola', 'struct StreamingSincResampler', 'RESAMPLER_HALF_TAPS: usize = 12', 'pub struct StreamingPlaybackDsp']:
+    need(token in dsp, f'missing shared DSP token {token}')
+need('playback_dsp::{OutputPeakGuard, PlaybackControls as NativePlaybackControls, StreamingPlaybackDsp}' in src, 'demo imports shared native DSP')
+need('struct StreamingSincResampler' not in src, 'demo duplicate sinc DSP removed')
 
 # Neutral remains a literal dry bypass; the new processor is only heard when active.
-need('if self.effect_was_active && !processed.is_empty()' in src and 'clean' in src,
+need('if self.effect_was_active && !processed.is_empty()' in dsp and 'clean' in dsp,
      'neutral dry bypass / transition missing')
 need('speed_control.enable(false)' not in src, 'speed control is not live')
 need('pitch_control.enable(false)' not in src, 'pitch control is not live')

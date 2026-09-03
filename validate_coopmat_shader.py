@@ -9,8 +9,8 @@ def need(ok, msg):
     if not ok:
         raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.39"' in root_cargo, 'root version')
-need('version = "0.7.39"' in demo_cargo, 'demo version')
+need('version = "0.7.55"' in root_cargo, 'root version')
+need('version = "0.7.55"' in demo_cargo, 'demo version')
 mem = '#extension GL_KHR_memory_scope_semantics : require'
 coop = '#extension GL_KHR_cooperative_matrix : require'
 need(mem in shader, 'GL_KHR_memory_scope_semantics extension missing')

@@ -6,7 +6,7 @@ set "MODE=%~1"
 if "%MODE%"=="" set "MODE=release"
 
 where cargo >nul 2>nul || (
-  echo ERROR: cargo not found. Install Rust 1.78+ from https://rustup.rs/
+  echo ERROR: cargo not found. Install Rust 1.87+ from https://rustup.rs/
   exit /b 1
 )
 

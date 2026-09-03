@@ -5,6 +5,7 @@ root = Path(__file__).resolve().parent
 runtime = (root / "src/runtime.rs").read_text()
 http = (root / "src/http.rs").read_text()
 demo = (root / "demo/src/main.rs").read_text()
+prosody = (root / "src/prosody_control.rs").read_text()
 root_cargo = (root / "Cargo.toml").read_text()
 demo_cargo = (root / "demo/Cargo.toml").read_text()
 
@@ -12,15 +13,15 @@ def need(cond, msg):
     if not cond:
         raise SystemExit("FAIL: " + msg)
 
-need('version = "0.7.39"' in root_cargo, "root version")
-need('version = "0.7.39"' in demo_cargo, "demo version")
+need('version = "0.7.55"' in root_cargo, "root version")
+need('version = "0.7.55"' in demo_cargo, "demo version")
 need('MIN_STREAMING_DECODE_CONTEXT_PATCHES: usize = 6' in runtime, "six-patch decoder floor")
 need('options.streaming_prefix_len.max(MIN_STREAMING_DECODE_CONTEXT_PATCHES)' in runtime, "caller prefix is clamped to decoder-safe floor")
 need('context.len()>decode_context_patches' in runtime, "rolling decode uses safe context")
 need('streaming_prefix_len: r.streaming_prefix_len.unwrap_or(6)' in http, "HTTP safe default")
 need('request["streaming_prefix_len"] = json!(6)' in demo, "demo safe streaming request")
 need('const DEFAULT_GAIN_PERCENT: u32 = 100' in demo, "fresh demo no longer amplifies every sample by 40%")
-need('moderate loudness rather than a constant shouted delivery' in demo, "anger recipe separates anger from loudness")
+need('moderate loudness rather than a constant shouted delivery' in prosody, "anger recipe separates anger from loudness")
 
 # Recompute the current decoder's causal receptive field for the newest 160 ms patch.
 # Forward topology: stem causal k7; each stage = ConvTranspose(k=2s,stride=s)

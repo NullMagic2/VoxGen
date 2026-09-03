@@ -7,7 +7,7 @@ probe=1
 if [[ "${2:-}" == "--no-probe" ]]; then probe=0; fi
 
 command -v cargo >/dev/null 2>&1 || {
-  echo "ERROR: cargo not found. Install Rust 1.78+ from https://rustup.rs/" >&2
+  echo "ERROR: cargo not found. Install Rust 1.87+ from https://rustup.rs/" >&2
   exit 1
 }
 

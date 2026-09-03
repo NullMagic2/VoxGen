@@ -5,6 +5,7 @@ main=(root/'src/main.rs').read_text()
 rt=(root/'src/runtime.rs').read_text()
 http=(root/'src/http.rs').read_text()
 demo=(root/'demo/src/main.rs').read_text()
+prosody=(root/'src/prosody_control.rs').read_text()
 root_cargo=(root/'Cargo.toml').read_text()
 demo_cargo=(root/'demo/Cargo.toml').read_text()
 readme=(root/'README.md').read_text()
@@ -12,13 +13,14 @@ readme=(root/'README.md').read_text()
 def need(c,m):
     if not c: raise AssertionError(m)
 
-need('version = "0.7.39"' in root_cargo,'root version')
-need('version = "0.7.39"' in demo_cargo,'demo version')
+need('version = "0.7.55"' in root_cargo,'root version')
+need('version = "0.7.55"' in demo_cargo,'demo version')
 
 # Native VoxCPM2 textual control, without rewriting the user's target text.
 for token in [
     'pub text:String, pub control:Option<String>',
-    'let controlled_text=if let Some(c)=control{format!("({c}){text}")}else{text.to_owned()};',
+    'let effective_control=control.map(|c|refine_control_instruction(c,text));',
+    'let controlled_text=if let Some(c)=effective_control.as_deref(){format!("({c}){text}")}else{text.to_owned()};',
     'VoxCPM2 style control cannot be combined',
     'pub text:String, pub control:Option<String>',
 ]: need(token in rt, f'runtime expressive contract: {token}')
@@ -50,19 +52,22 @@ for token in [
     'req.control.as_deref()',
 ]: need(token in http, f'HTTP expressive contract: {token}')
 
-# Demo presets/intensity use natural-language model guidance, not pitch recipes.
+# Demo owns the UI labels while the engine owns the natural-language recipes.
 for token in [
     'const STYLE_PRESETS:', '"warm", "Warm"', '"excited", "Excited"',
     '"sad", "Sad"', '"concerned", "Concerned"', '"angry", "Angry"',
     '"whisper", "Whisper-like"', '"custom", "Custom"',
     'const INTENSITIES:', '"subtle", "Subtle"', '"strong", "Strong"',
-    'fn build_style_control',
+    'build_style_control',
+    'Custom instruction:',
+]: need(token in demo, f'demo style control: {token}')
+for token in [
+    'pub fn build_style_control',
     'natural phrase-level variation in emphasis and emotion rather than a fixed tone',
     'enthusiasm rising on important phrases without shouting',
     'becoming gently reassuring',
     'moderate loudness rather than a constant shouted delivery',
-    'Custom instruction:',
-]: need(token in demo, f'demo style control: {token}')
+]: need(token in prosody, f'engine style control: {token}')
 
 # Clone-mode UI, exact transcript, emotional reference profiles.
 for token in [

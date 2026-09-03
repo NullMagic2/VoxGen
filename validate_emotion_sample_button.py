@@ -9,8 +9,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.39"' in root_cargo, 'root version')
-need('version = "0.7.39"' in demo_cargo, 'demo version')
+need('version = "0.7.55"' in root_cargo, 'root version')
+need('version = "0.7.55"' in demo_cargo, 'demo version')
 need('fn update_emotion_sample_button' in main, 'dynamic sample button helper')
 need('format!("Select {emotion} sample...")' in main, 'emotion-specific button label')
 need('button.set_min_size(Size::new(-1, -1));' in main, 'old minimum reset before resize')

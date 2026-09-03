@@ -2,21 +2,26 @@ from pathlib import Path
 import math
 
 root = Path(__file__).resolve().parent
-src = (root / 'demo/src/main.rs').read_text()
-cargo = (root / 'demo/Cargo.toml').read_text()
+src = (root / 'src/playback_dsp.rs').read_text()
+cargo = (root / 'Cargo.toml').read_text()
 
 def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('wsola = "0.1.0"' in cargo, 'WSOLA dependency')
-need('phase vocoder' in src.lower(), 'migration rationale retained')
+need('wsola = "0.1.0"' not in cargo, 'generic WSOLA dependency removed')
+need('WSOLA' in src and 'sinc' in src.lower(), 'speech-oriented DSP rationale retained')
+need('struct SpeechWsola' in src, 'engine-owned speech WSOLA')
+need('0.0075' in src and '/ 6000.0' in src, 'legacy speech search geometry')
+need('dot / denom' in src, 'normalized correlation matcher')
+need('raw dot product' in src, 'echo regression rationale')
+need('(self.factor - 1.0).abs() < 1.0e-9' in src, 'pitch-neutral resampler bypass')
 need('RESAMPLER_HALF_TAPS: usize = 12' in src, '24-tap sinc quality')
-need('DSP_TRANSITION_SAMPLES: usize = 480' in src, '10ms live transition')
-need('Self::crossfade_in(&mut processed, &dry);' in src, 'activation crossfade')
+need('((sample_rate as usize) / 100).max(1)' in src, '10ms live transition')
+need('Self::crossfade_in(&mut processed, &dry, self.sample_rate);' in src, 'activation crossfade')
 need('let cutoff = (1.0 / self.factor.max(1.0)).min(1.0);' in src, 'upshift anti-alias filter')
-need('2.0_f32.powf(pitch_semitones as f32 / 12.0)' in src, 'equal-tempered pitch mapping')
-need('let wsola_tempo = (speed / pitch_factor).clamp(0.25, 4.0);' in src,
+need('2.0_f32.powf(self.pitch_semitones / 12.0)' in src, 'equal-tempered pitch mapping')
+need('self.speed_percent / 100.0 / self.pitch_factor()' in src,
      'duration compensation formula')
 
 # Numerical sanity for the 24-tap Lanczos kernel: DC gain is normalized and all

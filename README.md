@@ -1,3 +1,91 @@
+# VoxGen v0.7.55 — All-style clipping / metallic safety
+
+## v0.7.55: Shared output peak guard and low-confidence WSOLA fallback
+
+This release hardens the common audio path for **every** managed style and custom control without changing their emotion recipes. VoxGen now replaces the old final `(sample * gain).clamp(-1, +1)` behavior with an engine-owned `OutputPeakGuard`: complete utterances receive a single uniform attenuation only when their post-gain peak would exceed 0.98, while streaming blocks use block look-ahead, immediate safe attenuation and a 250 ms slow release. Below the ceiling the guard is transparent. The CLI and HTTP paths use the same guard, and the demo protects the output again after its live native speed/pitch DSP because sinc/WSOLA can create small post-server overshoots.
+
+WSOLA also gains a low-confidence synchronization fallback. Normalized-correlation matching remains authoritative for voiced speech, but very low-energy overlaps or matches below NCC 0.20 now stay at the predicted analysis position instead of chasing accidental correlations in breath/noise-dominated material. This specifically reduces phasey/warbling/metallic artifacts on Whisper-like speech, fricatives and other weakly periodic spans while retaining the amplitude-complementary raised-cosine overlap that fixed the earlier +3 dB/echo problem. No per-style EQ, compressor, pitch shifter, spectral enhancer or hidden gain stage is introduced. See `V092_ALL_STYLE_AUDIO_SAFETY_VALIDATION.md`.
+
+# VoxGen v0.7.54 — Neutral prosody cleanup
+
+## v0.7.54: Natural neutral baseline
+
+This release makes managed **Neutral** a true reference baseline rather than an instruction for vague "emotional balance". Neutral now preserves the cloned speaker's habitual pitch centre, ordinary pitch variability, normal rate/loudness, lexical stress, syntax-driven phrase contours and small human timing variation while avoiding any deliberately imposed affective stance. It explicitly avoids the two common failure modes of neutral TTS: becoming emotionally coloured (warm/serious/etc.) or becoming unnaturally flat, robotic, cold or monotone. Short questions/exclamations retain ordinary linguistic intonation without being promoted into emotional acting.
+
+Neutral receives **no automatic CFG delta and no demo gain multiplier** (`+0.00`, `1.00x`), making it a cleaner acoustic baseline for comparison with every managed style. Older v0.7.53 Neutral recipe strings remain recognized and are upgraded by the runtime compiler. No playback DSP, EQ, pitch shifting, compression, reference conditioning, or generation topology changes are introduced.
+
+# VoxGen v0.7.53 — Serious / Sad realism
+
+## v0.7.53: Serious stance and low-arousal Sad prosody
+
+This release adds dedicated research-guided compilers for **Serious** and **Sad**. Serious is treated as a communicative stance rather than a basic emotion: natural pitch centre, controlled but living pitch excursions, deliberate semantic pauses, firm clean articulation, stable conversational intensity, selective prominence, and resolved falling endings where linguistically appropriate. It explicitly avoids the old Strong-Serious `grave, authoritative` seed, forced deep pitch, ominous/movie-trailer delivery, anger and monotone. Managed Serious receives only conservative CFG guidance (+0.05 Subtle; +0.10 Normal/Strong) and no automatic demo gain change.
+
+Sad follows the robust low-arousal acoustic pattern reported across emotional-prosody studies: lower mean pitch, narrower pitch range, lower intensity and slower rate than neutral. The compiler scales those cues by intensity and explicitly prevents Sad from collapsing into sleepiness, boredom, depression-like flatness, whispering, or high-arousal grief/wailing. The demo applies visible request-time Sad level multipliers of 0.97x / 0.94x / 0.90x for Subtle / Normal / Strong and a +0.10 managed CFG delta. External clients that explicitly specify gain/CFG remain authoritative; no post-synthesis EQ, pitch shifting, compression, or hidden emotion DSP is added.
+
+# VoxGen v0.7.52 — Excited / Gentle realism
+
+## v0.7.52: Excited re-audit and Gentle low-effort voice
+
+This release re-audits **Excited** and adds a full managed compiler for **Gentle**. Excited is no longer seeded from a "pleasantly surprised" recipe: subtle excitement now means positive anticipation/interest with a slightly raised pitch centre, more variable/wider pitch movement, lightly faster timing, and brief local pitch/intensity peaks that release back toward conversational level. Normal and Strong Excited keep high-arousal positive dynamics without sustained loudness, shrillness, frantic delivery, or surprise-like pitch shocks.
+
+Gentle is now defined as a **low-vocal-effort speaking style**, not a synonym for Warm/Tender. It uses reduced projection/loudness, smooth connected phrasing, light clean attacks, relaxed articulation and restrained but living pitch movement while preserving the text's own emotional valence. The demo uses visible request-time Gentle level multipliers of 0.98x / 0.95x / 0.92x for Subtle / Normal / Strong and conservative CFG deltas of +0.10 / +0.15 / +0.15. These are not hidden engine/API gain stages; explicit external client gain/CFG remains authoritative.
+
+## v0.7.51: Whisper-like and controlled-Angry realism
+
+This release extends the research-guided managed-prosody compiler to **Whisper-like** and **Angry**. Whisper-like now targets low vocal effort, audible airflow/noise, softened attacks and reduced periodic voicing instead of merely asking for a quiet breathy voice. Because a true whisper removes ordinary periodic voicing/F0 and can weaken cloned-speaker identity, VoxGen deliberately targets a controlled near-whisper that preserves intelligibility and as much identity as possible.
+
+Angry now targets **controlled/cold anger**, not explosive hot anger: firm vocal tension, hard clean attacks, compact purposeful pitch movement, quicker timing/shorter pauses and brief local emphasis while keeping sustained loudness moderate. Short exclamations/questions sharpen timing and attack rather than loudness. The demo applies a conservative 0.90x Angry level and 0.85x Whisper-like level; these are visible request-time multipliers and are not hidden engine/API gain stages.
+
+Managed CFG remains conservative: Whisper-like gets +0.10; Angry gets no automatic CFG increase. Explicit API CFG remains authoritative.
+
+
+This revision adds research-guided managed-prosody compilers for **Excited** and **Concerned**. Excited speech is steered through dynamic high-arousal cues—moderately raised/wider pitch, quicker transitions, crisp articulation, and brief phrase-level energy peaks followed by release—rather than sustained loudness. Concerned speech is treated as a mixed contour: mild alert tension and responsive pitch on concern-bearing phrases, followed by lower/slower/softer, smoother reassurance where the wording allows. Strong Excited and Strong Concerned are now correctly recognized as strong intensity by the compiler. Managed Concerned receives a conservative +0.10 CFG delta when CFG is not explicitly fixed; Excited receives no automatic CFG increase to avoid over-expression. No EQ, artificial pitch shifting, compression, or post-synthesis emotion processing is added.
+
+# VoxGen v0.7.49 — Managed style strength and Warm level
+
+This revision makes low-arousal managed styles more perceptible without adding post-synthesis coloration. The demo now resolves and logs the **exact effective control instruction** that reaches VoxCPM2. Managed Warm adds +0.20 CFG over the user's base CFG, Gentle adds +0.15, and Subtle Cheerful adds +0.10, all capped at 3.0. HTTP clients that omit `cfg_value` receive the same conservative managed guidance automatically; an explicitly supplied API CFG remains authoritative.
+
+The demo also gives managed Warm a small **+5% request-gain lift** (about +0.42 dB). This is sent as the ordinary VoxGen `gain` value, not applied as a second playback/post-processing stage. The UI continues to store the user's base gain unchanged, and the log shows both base and effective values. External clients such as Dynamic Dictionary retain explicit control of their own per-style gain and do not receive a hidden Warm gain multiplier.
+
+## v0.7.48 warmth / subtle-positive prosody refinement
+
+This revision makes managed **warm** delivery explicitly low-arousal, affiliative and tender instead of treating warmth as neutral speech plus pitch lifts. Managed **subtle cheerful** delivery now keeps loudness/pitch centre near neutral while retaining a small, definite pitch-variability and rhythmic cue floor so it remains perceptibly positive. No new post-generation EQ, pitch, formant, compression or loudness processing is added.
+
+## v0.7.47 shared-library import build fix
+
+- Fixes the managed prosody compiler import in the binary runtime (`voxgen::prosody_control`, not `crate::prosody_control`).
+- Removes the unused `DSP_PULL_CHUNK` constant and its build warning.
+- Adds a regression validator for binary/library module ownership.
+
+## v0.7.47 WSOLA headroom / expressive-speech distortion fix
+
+- uses an amplitude-complementary raised-cosine WSOLA overlap so correlated speech is not boosted by up to ~3 dB;
+- removes destructive clipping from inside playback DSP;
+- preserves floating-point headroom until requested gain and final output serialization;
+- specifically prevents high-energy/angry speech at non-100% playback speeds from becoming progressively clipped and distorted.
+
+## v0.7.45 warm and subtle-cheerful prosody
+
+VoxGen now compiles its managed **Warm** and **Cheerful** style recipes into concise, research-guided acoustic goals before VoxCPM2 tokenization. Subtle cheerfulness requests a light audible smile, slightly brighter resonance than neutral, small buoyant pitch lifts, gently lively rhythm, and steady conversational loudness. Warmth requests smooth connected phrasing, relaxed articulation, soft consonant attacks, stable moderate-low loudness, and small welcoming pitch lifts. Very short positive lines receive a guard against building to a climax; an exclamation mark is treated as friendly brightness rather than an instruction to shout.
+
+This compiler is deliberately narrow: it recognizes only the exact managed recipe families emitted by VoxGen/Dynamic Dictionary. Arbitrary user-authored `--control` or HTTP `control` instructions remain unchanged. The demo now imports the engine's shared style-recipe builder, eliminating another source of client/demo divergence. No playback DSP, reference normalization, punctuation rewriting, CFG, temperature, or CFM behavior changed in this release.
+
+## v0.7.41 concise playback CLI flags
+
+The VoxGen command-line interface exposes native playback DSP as `--speed` (percent, 50–200, default 100) and `--pitch` (semitones, -12..+12, default 0). The former automatically generated Clap names `--speed-percent` and `--pitch-semitones` are intentionally not accepted and are not retained as aliases. HTTP/API field names remain `speed_percent` and `pitch_semitones` because they encode the units explicitly.
+
+Example:
+
+```text
+voxgen --text "Hello" --speed 115 --pitch -2 --output-wav out.wav
+```
+
+## v0.7.40 native playback DSP
+
+VoxGen now owns speed/pitch playback processing as part of the engine crate. `src/playback_dsp.rs` is the single authoritative implementation: a band-limited sinc pitch transposer followed by engine-owned, normalized-correlation speech WSOLA time scaling. The HTTP speech API accepts `speed_percent` (50–200, default 100) and `pitch_semitones` (-12..+12, default 0) and applies the DSP before returning streaming or completed PCM/WAV. `/health` advertises `native_playback_dsp: true` plus the supported ranges.
+
+The wxDragon demo consumes the same engine module through a thin live-control adapter instead of maintaining its own copy of the algorithm. At 100% / 0 semitones the original finite PCM takes a neutral dry bypass. The engine now owns the speech WSOLA implementation directly. The v0.7.43 matcher restores normalized waveform correlation and the narrower search geometry used by the pre-migration playback path, avoiding the energy-biased candidate selection that could sound echoey or unnaturally tense. External clients should send speed/pitch controls to VoxGen rather than post-processing VoxGen audio independently.
+
 
 ## v0.7.39 clean-source scripts
 
@@ -393,11 +481,13 @@ The first optimization target after correctness validation is persistent/capture
 
 ## Building
 
-Install Rust 1.78+ and the Vulkan SDK / `glslc`. The project root intentionally contains only two build launchers:
+Install Rust 1.87+ and the Vulkan SDK / `glslc`. The project root contains the paired build and source-clean launchers:
 
 ```text
-build_voxgen.bat     Windows master launcher
-build_voxgen.sh      Linux master launcher
+build_voxgen.bat     Windows master build launcher
+build_voxgen.sh      Linux master build launcher
+clean_source.bat     Windows project-local source cleaner
+clean_source.sh      Linux project-local source cleaner
 ```
 
 Windows:

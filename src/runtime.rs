@@ -10,6 +10,7 @@ use crate::{
     vulkan::{ExecutionMode, VulkanContext, XtxTuning},
 };
 use anyhow::{bail, Context, Result};
+use voxgen::prosody_control::refine_control_instruction;
 use serde::Serialize;
 use std::{
     fs,
@@ -723,9 +724,11 @@ impl Runtime {
             bail!("VoxCPM2 style control cannot be combined with prompt-audio + prompt-text continuation/ultimate cloning");
         }
         // VoxCPM2's native style-control contract is textual: `(instruction)` is
-        // prepended to the target text before tokenization.  Preserve the user's
-        // punctuation and wording verbatim after the control prefix.
-        let controlled_text=if let Some(c)=control{format!("({c}){text}")}else{text.to_owned()};
+        // prepended to the target text before tokenization. VoxGen-managed style
+        // recipes are compiled into acoustic goals here so every client gets the
+        // same warm/cheerful rendering. Arbitrary custom controls stay verbatim.
+        let effective_control=control.map(|c|refine_control_instruction(c,text));
+        let controlled_text=if let Some(c)=effective_control.as_deref(){format!("({c}){text}")}else{text.to_owned()};
         let token_text=if prompt_wav.is_some(){format!("{}{}",prompt_text.unwrap_or(""),controlled_text)}else{controlled_text};
         let text_tokens=self.tokenizer.encode(&token_text)?;
         if cancelled() { bail!("speech synthesis cancelled"); }

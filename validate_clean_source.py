@@ -96,4 +96,4 @@ with tempfile.TemporaryDirectory(prefix="voxgen-clean-") as tmp:
     ):
         need(not (fixture / rel).exists(), f"cleaner left disposable artifact: {rel}")
 
-print("v0.7.39 clean-source validation passed")
+print("v0.7.40 clean-source validation passed")

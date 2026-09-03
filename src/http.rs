@@ -4,6 +4,10 @@ use crate::{
     runtime::{Runtime, TtsOptions},
     vulkan::{ExecutionMode, XtxTuning},
 };
+use voxgen::{
+    playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp, OUTPUT_PEAK_CEILING},
+    prosody_control::apply_managed_cfg,
+};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
@@ -45,6 +49,10 @@ struct SpeechRequest {
     response_format: Option<String>,
     #[serde(default)]
     gain: Option<f32>,
+    #[serde(default)]
+    speed_percent: Option<f32>,
+    #[serde(default)]
+    pitch_semitones: Option<f32>,
     #[serde(default)]
     inference_timesteps: Option<u32>,
     #[serde(default)]
@@ -341,13 +349,20 @@ fn options(runtime: &Runtime, r: &SpeechRequest) -> TtsOptions {
         .as_ref()
         .map(|x| x.config.cfm_cfg_rate)
         .unwrap_or(2.0);
+    // An explicitly supplied cfg_value is authoritative. When clients leave
+    // CFG unspecified, give VoxGen-managed low-arousal styles a small guidance
+    // lift so warmth/gentleness does not collapse back into neutral speech.
+    let cfg_value = match r.cfg_value {
+        Some(explicit) => explicit,
+        None => apply_managed_cfg(cfg, r.control.as_deref()),
+    };
     TtsOptions {
         min_steps: r.min_steps.unwrap_or(2),
         max_steps: r.max_steps.unwrap_or(200),
         streaming_prefix_len: r.streaming_prefix_len.unwrap_or(6),
         cfm: CfmOptions {
             n_timesteps: r.inference_timesteps.unwrap_or(10),
-            cfg_value: r.cfg_value.unwrap_or(cfg),
+            cfg_value,
             temperature: r.temperature.unwrap_or(1.0),
             sway_sampling_coef: r.sway_sampling_coef.unwrap_or(1.0),
             seed: r.seed.unwrap_or(42),
@@ -373,16 +388,17 @@ fn wav_header_f32(sample_rate: u32, data_bytes: u32) -> Vec<u8> {
     v
 }
 
-fn pcm_bytes(x: &[f32], gain: f32) -> Vec<u8> {
+fn pcm_bytes(x: &[f32]) -> Vec<u8> {
     let mut b = Vec::with_capacity(x.len() * 4);
     for &v in x {
-        b.extend_from_slice(&(v * gain).clamp(-1.0, 1.0).to_le_bytes());
+        let safe = if v.is_finite() { v } else { 0.0 };
+        b.extend_from_slice(&safe.clamp(-OUTPUT_PEAK_CEILING, OUTPUT_PEAK_CEILING).to_le_bytes());
     }
     b
 }
 
-fn wav_bytes(x: &[f32], gain: f32) -> Vec<u8> {
-    let pcm = pcm_bytes(x, gain);
+fn wav_bytes(x: &[f32]) -> Vec<u8> {
+    let pcm = pcm_bytes(x);
     let mut b = wav_header_f32(48000, pcm.len().min(u32::MAX as usize) as u32);
     b.extend_from_slice(&pcm);
     b
@@ -448,6 +464,34 @@ fn health_json(state: &ServerState) -> Result<Value> {
         "speech_inference_ready": current.get("speech_inference_ready").and_then(Value::as_bool).unwrap_or(false),
         "streaming_enabled": state.streaming_enabled,
         "default_gain": state.default_gain,
+        "native_playback_dsp": true,
+        "native_managed_prosody": true,
+        "managed_prosody": {
+            "version": 8,
+            "profiles": ["neutral", "warm", "cheerful", "excited", "concerned", "angry", "gentle", "whisper", "serious", "sad"],
+            "neutral_semantics": "natural-linguistic-prosody-without-imposed-affect-not-flatness",
+            "warmth_semantics": "low-arousal-affiliative-tender",
+            "subtle_positive_cue_floor": true,
+            "excited_semantics": "high-arousal-positive-engagement-not-surprise-with-local-release",
+            "gentle_semantics": "low-vocal-effort-low-projection-emotion-preserving",
+            "concerned_semantics": "attentive-alertness-to-caring-reassurance",
+            "angry_semantics": "controlled-cold-anger-tension-timing-not-loudness",
+            "whisper_semantics": "low-effort-near-whisper-airflow-reduced-periodic-voicing",
+            "serious_semantics": "committed-attentional-stance-not-forced-low-pitch",
+            "sad_semantics": "low-arousal-lower-narrower-softer-slower-not-grief-or-sleepiness",
+            "managed_cfg_guidance": {"warm_delta": 0.20, "gentle_subtle_delta": 0.10, "gentle_normal_strong_delta": 0.15, "subtle_cheerful_delta": 0.10, "concerned_delta": 0.10, "whisper_delta": 0.10, "sad_delta": 0.10, "serious_subtle_delta": 0.05, "serious_normal_strong_delta": 0.10, "excited_delta": 0.0, "angry_delta": 0.0, "explicit_cfg_preserved": true},
+            "short_utterance_guard": true,
+            "custom_controls_preserved": true
+        },
+        "playback_dsp": {
+            "algorithm": "sinc+speech-wsola-ncc-confidence+peak-guard",
+            "overlap_crossfade": "raised-cosine-amplitude-complementary",
+            "wsola_low_confidence_fallback": "predicted-analysis-position",
+            "internal_clipping": false,
+            "output_peak_guard": {"enabled": true, "sample_peak_ceiling": OUTPUT_PEAK_CEILING, "stream_release_ms": 250.0, "uniform_offline_attenuation": true},
+            "speed_percent": {"min": 50.0, "max": 200.0, "default": 100.0},
+            "pitch_semitones": {"min": -12.0, "max": 12.0, "default": 0.0}
+        },
         "mode": current.get("mode").cloned().unwrap_or_else(|| json!(state.default_mode.as_str())),
         "gpu_profile": state.default_xtx_tuning.gpu_profile,
         "benchmark_profile": state.default_mode == ExecutionMode::Xtx7900
@@ -613,6 +657,10 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
     if !gain.is_finite() || gain < 0.0 {
         bail!("speech gain must be a finite value >= 0.0");
     }
+    let playback_controls = PlaybackControls::new(
+        req.speed_percent.unwrap_or(100.0),
+        req.pitch_semitones.unwrap_or(0.0),
+    ).map_err(anyhow::Error::msg)?;
 
     // Establish a request-scoped cancellation identity only after request parsing
     // and conditioning validation. A targeted Stop can arrive slightly before the
@@ -631,7 +679,10 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
     if streaming {
         write!(
             s,
-            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-VoxGen-Sample-Rate: 48000\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-VoxGen-Sample-Rate: 48000\r\nX-VoxGen-Native-Playback-DSP: 1\r\nX-VoxGen-Peak-Guard: 0.980\r\nX-VoxGen-Speed-Percent: {:.3}\r\nX-VoxGen-Pitch-Semitones: {:+.3}\r\nX-VoxGen-CFG: {:.3}\r\n\r\n",
+            playback_controls.speed_percent,
+            playback_controls.pitch_semitones,
+            opt.cfm.cfg_value
         )?;
         // Streaming length is unknown until stop prediction fires. 0xffffffff is the conventional streaming sentinel.
         write_chunk(&mut s, &wav_header_f32(48000, u32::MAX))?;
@@ -646,6 +697,9 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
             }
             Ok(())
         });
+        let mut playback_dsp = StreamingPlaybackDsp::new(48_000, playback_controls)
+            .map_err(anyhow::Error::msg)?;
+        let mut peak_guard = OutputPeakGuard::new(48_000).map_err(anyhow::Error::msg)?;
         let synth = runtime.synthesize_cancelable(
             &req.input,
             req.control.as_deref(),
@@ -655,11 +709,25 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
             &opt,
             Some(&state.cancel_speech),
             Some(|chunk: &[f32], _sr: u32| -> Result<()> {
+                let processed = playback_dsp.push(chunk).map_err(anyhow::Error::msg)?;
+                if processed.is_empty() {
+                    return Ok(());
+                }
+                let protected = peak_guard.process(&processed, gain).map_err(anyhow::Error::msg)?;
                 pcm_tx
-                    .send(pcm_bytes(chunk, gain))
+                    .send(pcm_bytes(&protected))
                     .map_err(|_| anyhow::anyhow!("streaming audio writer disconnected"))
             }),
         );
+        if synth.is_ok() && !state.cancel_speech.load(Ordering::Acquire) {
+            let tail = playback_dsp.finish().map_err(anyhow::Error::msg)?;
+            if !tail.is_empty() {
+                let protected = peak_guard.process(&tail, gain).map_err(anyhow::Error::msg)?;
+                pcm_tx
+                    .send(pcm_bytes(&protected))
+                    .map_err(|_| anyhow::anyhow!("streaming audio writer disconnected"))?;
+            }
+        }
         drop(pcm_tx);
         let writer_result = writer
             .join()
@@ -697,21 +765,30 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
             }
             Err(err) => return Err(err),
         };
+        let rendered_samples = StreamingPlaybackDsp::process_all(48_000, playback_controls, &result.samples)
+            .map_err(anyhow::Error::msg)?;
+        let protected_samples = OutputPeakGuard::process_all(48_000, &rendered_samples, gain)
+            .map_err(anyhow::Error::msg)?;
+        let rendered_audio_seconds = protected_samples.len() as f64 / 48_000.0;
         let headers = [
             ("X-VoxGen-Generated-Patches", result.generated_patches.to_string()),
             ("X-VoxGen-Stopped-By-Predictor", result.stopped_by_predictor.to_string()),
-            ("X-VoxGen-Audio-Seconds", format!("{:.6}", result.audio_seconds)),
+            ("X-VoxGen-Audio-Seconds", format!("{:.6}", rendered_audio_seconds)),
+            ("X-VoxGen-Speed-Percent", format!("{:.3}", playback_controls.speed_percent)),
+            ("X-VoxGen-Pitch-Semitones", format!("{:+.3}", playback_controls.pitch_semitones)),
+            ("X-VoxGen-Peak-Guard", format!("{:.3}", OUTPUT_PEAK_CEILING)),
+            ("X-VoxGen-CFG", format!("{:.3}", opt.cfm.cfg_value)),
             ("X-VoxGen-Elapsed-Ms", format!("{:.3}", result.elapsed_ms)),
             ("X-VoxGen-First-PCM-Ms", format!("{:.3}", result.first_pcm_ms.unwrap_or_default())),
             ("X-VoxGen-RTF", format!("{:.6}", result.rtf)),
         ];
         match req.response_format.as_deref().unwrap_or("wav") {
-            "wav" => send_with_headers(s, "200 OK", "audio/wav", &wav_bytes(&result.samples, gain), &headers),
+            "wav" => send_with_headers(s, "200 OK", "audio/wav", &wav_bytes(&protected_samples), &headers),
             "pcm" | "f32" => send_with_headers(
                 s,
                 "200 OK",
                 "application/octet-stream",
-                &pcm_bytes(&result.samples, gain),
+                &pcm_bytes(&protected_samples),
                 &headers,
             ),
             x => bail!("unsupported response_format {x:?}; use wav or pcm"),

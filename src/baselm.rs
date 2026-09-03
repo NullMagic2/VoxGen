@@ -9,7 +9,6 @@ use memmap2::Mmap;
 use serde::Serialize;
 use std::{
     fs::File,
-    path::Path,
     time::Instant,
 };
 

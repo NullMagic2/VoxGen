@@ -13,8 +13,8 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.39"' in root_cargo, 'root version')
-need('version = "0.7.39"' in demo_cargo, 'demo version')
+need('version = "0.7.55"' in root_cargo, 'root version')
+need('version = "0.7.55"' in demo_cargo, 'demo version')
 
 # CLI stream mode: explicit on/off, default off, bare compatibility switch -> on.
 for token in [

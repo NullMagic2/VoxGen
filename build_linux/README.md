@@ -3,7 +3,7 @@
 All Linux build/smoke launchers live here. Run the root `./build_voxgen.sh` for the normal release build.
 
 Requirements:
-- Rust/Cargo 1.78+
+- Rust/Cargo 1.87+
 - Vulkan loader/driver for your GPU
 - `glslc` from the Vulkan SDK (or set `VOXGEN_GLSLC=/path/to/glslc`)
 - Python 3 for deterministic smoke-vector regeneration

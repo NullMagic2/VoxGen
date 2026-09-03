@@ -1,5 +1,9 @@
 # VoxGen wxDragon demo
 
+## Native playback DSP (v0.7.40)
+
+The demo no longer contains its own speed/pitch DSP algorithm. Its live Speed and Pitch controls call the shared `voxgen::playback_dsp` module from the engine crate, so demo playback and VoxGen's HTTP API use the same sinc + normalized-correlation speech WSOLA math. Live slider changes remain supported: the demo is only a thin control/playback adapter over the shared stateful processor.
+
 ## Cleaning downloaded/build files (v0.7.39)
 
 Run `clean_source.bat` on Windows or `./clean_source.sh` on Linux from this `demo/` folder. The wrapper invokes the project-level cleaner, so both the demo and engine trees are cleaned together while their final debug/release binaries are preserved. Project-local `models/`, download/cache directories, Cargo build intermediates, generated smoke-test outputs, and generated lockfiles are removed. Global Cargo caches and model directories outside the VoxGen source tree are never touched.

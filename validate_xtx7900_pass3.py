@@ -11,7 +11,7 @@ base = (root/'src/baselm.rs').read_text()
 ac = (root/'src/acoustic.rs').read_text()
 main = (root/'src/main.rs').read_text()
 
-need('version = "0.7.39"' in (root/'Cargo.toml').read_text(), 'root version')
+need('version = "0.7.55"' in (root/'Cargo.toml').read_text(), 'root version')
 need('if self.gpu.gpu_profiling_enabled() { 16 } else { 32 }' in rt, 'profile16/live32 prefill batch size')
 need('self.gpu.mode == ExecutionMode::Xtx7900' in rt, 'XTX-only prefill batching gate')
 need('prefill.cross_engine_batch' in rt, 'prefill profiler span')

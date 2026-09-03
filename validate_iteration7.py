@@ -6,7 +6,7 @@ def need(x,msg):
     if not x: raise AssertionError(msg)
 
 cargo=(root/'Cargo.toml').read_text()
-need('version = "0.7.39"' in cargo,'Cargo version')
+need('version = "0.7.55"' in cargo,'Cargo version')
 need('base64 = "0.22"' in cargo,'HTTP base64 dependency')
 main=(root/'src/main.rs').read_text(); rt=(root/'src/runtime.rs').read_text(); ac=(root/'src/acoustic.rs').read_text(); gg=(root/'src/gguf.rs').read_text(); tok=(root/'src/tokenizer.rs').read_text(); http=(root/'src/http.rs').read_text()
 need('implementation_iteration: 7' in rt,'runtime iteration')
@@ -37,7 +37,7 @@ for f in ['smoke_tts.sh','smoke_tts_stream.sh','smoke_voice_clone_reference.sh',
 need((root/'build_voxgen.bat').exists(),'missing root Windows master launcher')
 need((root/'build_voxgen.sh').exists(),'missing root Linux master launcher')
 root_scripts=[p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in {'.bat','.sh'}]
-need(sorted(root_scripts)==['build_voxgen.bat','build_voxgen.sh'],f'unexpected root scripts: {root_scripts}')
+need(sorted(root_scripts)==['build_voxgen.bat','build_voxgen.sh','clean_source.bat','clean_source.sh'],f'unexpected root scripts: {root_scripts}')
 win_scripts={p.stem for p in (root/'build_windows').glob('*.bat') if p.stem not in {'_common','build_voxgen'}}
 lin_scripts={p.stem for p in (root/'build_linux').glob('*.sh') if p.stem not in {'_common','build_voxgen'}}
 need(win_scripts==lin_scripts,f'Windows/Linux script parity mismatch win-only={sorted(win_scripts-lin_scripts)} linux-only={sorted(lin_scripts-win_scripts)}')

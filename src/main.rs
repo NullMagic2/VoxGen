@@ -19,6 +19,7 @@ use gguf::BaseFormat;
 use local::{CfmOptions, LocalConfig};
 use runtime::{Runtime, TtsOptions};
 use vulkan::{ExecutionMode, XtxTuning};
+use voxgen::playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp};
 use serde_json::json;
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::Instant};
 
@@ -330,6 +331,14 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     gain: f32,
 
+    /// Native playback tempo control. 100 keeps the generated duration unchanged.
+    #[arg(long = "speed", default_value_t = 100.0)]
+    speed_percent: f32,
+
+    /// Native playback pitch shift in semitones, independent of speed.
+    #[arg(long = "pitch", default_value_t = 0.0)]
+    pitch_semitones: f32,
+
     /// Enable or disable rolling AudioVAE/HTTP speech streaming. Default: off.
     /// `--stream` by itself remains accepted as an alias for `--stream on`.
     #[arg(
@@ -391,6 +400,8 @@ fn main() -> Result<()> {
     if !args.gain.is_finite() || args.gain < 0.0 {
         bail!("--gain must be a finite value >= 0.0");
     }
+    let playback_controls = PlaybackControls::new(args.speed_percent, args.pitch_semitones)
+        .map_err(anyhow::Error::msg)?;
     if args.variations == 0 || args.variations > 8 {
         bail!("--variations must be between 1 and 8");
     }
@@ -648,13 +659,16 @@ fn main() -> Result<()> {
             } else {
                 runtime.synthesize::<fn(&[f32],u32)->Result<()>>(text,args.control.as_deref(),args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,None)?
             };
-            let output_samples=apply_gain(&result.samples,args.gain);
+            let playback_samples=StreamingPlaybackDsp::process_all(result.sample_rate, playback_controls, &result.samples)
+                .map_err(anyhow::Error::msg)?;
+            let output_samples=OutputPeakGuard::process_all(result.sample_rate, &playback_samples, args.gain)
+                .map_err(anyhow::Error::msg)?;
             let output_path=args.output_wav.as_ref().map(|p|variation_output_path(p,variation,args.variations));
             if let Some(out)=output_path.as_ref(){audiovae::write_wav_f32(out,&output_samples,result.sample_rate)?;}
             reports.push(json!({"variation":variation+1,"seed":tts.cfm.seed,"output_wav":output_path,"result":result}));
         }
         let gpu_profile=runtime.status().gpu_profile;
-        println!("{}",serde_json::to_string_pretty(&json!({"mode":"tts","streaming":stream_enabled,"gain":args.gain,"control":args.control,"clone_mode":format!("{:?}",args.clone_mode).to_ascii_lowercase(),"variations":reports,"gpu_profile":gpu_profile}))?);
+        println!("{}",serde_json::to_string_pretty(&json!({"mode":"tts","streaming":stream_enabled,"gain":args.gain,"speed_percent":args.speed_percent,"pitch_semitones":args.pitch_semitones,"control":args.control,"clone_mode":format!("{:?}",args.clone_mode).to_ascii_lowercase(),"variations":reports,"gpu_profile":gpu_profile}))?);
         return Ok(());
     } else if args.output_wav.is_some() || args.prompt_text.is_some() || args.control.is_some() { bail!("--output-wav/--prompt-text/--control require --text"); }
 
@@ -817,13 +831,6 @@ fn main() -> Result<()> {
         stream_enabled,
         args.gain,
     )
-}
-
-fn apply_gain(samples: &[f32], gain: f32) -> Vec<f32> {
-    if gain == 1.0 {
-        return samples.to_vec();
-    }
-    samples.iter().map(|&sample| (sample * gain).clamp(-1.0, 1.0)).collect()
 }
 
 fn parse_tokens(text: &str) -> Result<Vec<u32>> {

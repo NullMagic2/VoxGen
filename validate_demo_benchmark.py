@@ -7,8 +7,8 @@ demo_cargo=(root/'demo/Cargo.toml').read_text()
 def need(cond,msg):
     if not cond: raise SystemExit(f'FAIL: {msg}')
 
-need('version = "0.7.39"' in root_cargo, 'root version')
-need('version = "0.7.39"' in demo_cargo, 'demo version')
+need('version = "0.7.55"' in root_cargo, 'root version')
+need('version = "0.7.55"' in demo_cargo, 'demo version')
 need('fn append_benchmark_results(' in src, 'benchmark helper')
 need('--- Benchmark results ---' in src, 'benchmark heading')
 need('Mode: {mode_label}' in src, 'mode line')
