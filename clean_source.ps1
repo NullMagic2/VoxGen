@@ -116,9 +116,20 @@ Clean-TargetKeepBinary (Join-Path $Root 'demo\target') @(
     'demo\Cargo.lock'
 ) | ForEach-Object { Remove-LocalFile (Join-Path $Root $_) }
 
-# Outputs produced by the bundled smoke tests. Deterministic input fixtures
-# shipped with the source remain untouched.
+# Generated inputs and outputs produced by the bundled smoke tests.
+# Deterministic input fixtures are recreated on demand and are not source files.
 @(
+    'test_base_hidden.f32',
+    'test_cfm_initial_x.f32',
+    'test_current_embed.f32',
+    'test_locdit_cond.f32',
+    'test_locdit_mu.f32',
+    'test_locdit_x.f32',
+    'test_locenc_patch.f32',
+    'test_prompt_latents.f32',
+    'test_reference_latents.f32',
+    'test_vae_latents.f32',
+    'test_vae_pcm16k.f32',
     'test_cfm_output.f32',
     'test_conditioned_cfm_output.f32',
     'test_clone.wav',

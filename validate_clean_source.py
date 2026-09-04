@@ -66,6 +66,8 @@ with tempfile.TemporaryDirectory(prefix="voxgen-clean-") as tmp:
         "Cargo.lock": b"lock",
         "demo/Cargo.lock": b"lock",
         "test_tts.wav": b"generated",
+        "test_base_hidden.f32": b"generated-fixture",
+        "test_vae_pcm16k.f32": b"generated-fixture",
         "test_vae_input.wav": b"fixture-must-survive",
     }.items():
         p = fixture / rel
@@ -93,7 +95,9 @@ with tempfile.TemporaryDirectory(prefix="voxgen-clean-") as tmp:
         "Cargo.lock",
         "demo/Cargo.lock",
         "test_tts.wav",
+        "test_base_hidden.f32",
+        "test_vae_pcm16k.f32",
     ):
         need(not (fixture / rel).exists(), f"cleaner left disposable artifact: {rel}")
 
-print("v0.7.40 clean-source validation passed")
+print("clean-source validation passed")

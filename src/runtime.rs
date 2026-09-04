@@ -10,7 +10,6 @@ use crate::{
     vulkan::{ExecutionMode, VulkanContext, XtxTuning},
 };
 use anyhow::{bail, Context, Result};
-use voxgen::prosody_control::refine_control_instruction;
 use serde::Serialize;
 use std::{
     fs,
@@ -183,6 +182,9 @@ pub struct Runtime {
     pub profiler: Arc<Profiler>,
     pub memory: MemoryPlan,
     tokenizer: VoxTokenizer,
+    speech_inference_ready: bool,
+    default_cfm_cfg_rate: f32,
+    active_context_length: u32,
 }
 
 impl Runtime {
@@ -268,6 +270,11 @@ impl Runtime {
                 gpu.info.local_heap_bytes as f64 / 1073741824.0
             );
         }
+        // These values are immutable for a Runtime. Cache them once instead of
+        // constructing a full RuntimeStatus snapshot on every synthesis/run.
+        let speech_inference_ready = acoustic_engine.is_some() && local_engine.is_some() && audiovae_engine.is_some();
+        let default_cfm_cfg_rate = local_engine.as_ref().map(|engine| engine.config.cfm_cfg_rate).unwrap_or(2.0);
+        let active_context_length = base_engine.config.active_context_length;
         Ok(Self {
             conditioning_audio_cache: Mutex::new(Vec::new()),
             audiovae_engine: Mutex::new(audiovae_engine),
@@ -281,8 +288,20 @@ impl Runtime {
             profiler,
             memory,
             tokenizer,
+            speech_inference_ready,
+            default_cfm_cfg_rate,
+            active_context_length,
         })
     }
+
+    #[inline]
+    pub fn speech_inference_ready(&self) -> bool { self.speech_inference_ready }
+
+    #[inline]
+    pub fn default_cfm_cfg_rate(&self) -> f32 { self.default_cfm_cfg_rate }
+
+    #[inline]
+    pub fn active_context_length(&self) -> u32 { self.active_context_length }
 
     pub fn status(&self) -> RuntimeStatus<'_> {
         let base_guard = self.baselm.lock().unwrap();
@@ -456,8 +475,13 @@ impl Runtime {
     /// Run the official latent-prefix semantics through LocEnc + BaseLM + ResidualLM.
     /// Reference/prompt inputs here are already AudioVAE latent patches; WAV encoding is step 6.
     pub fn prefill_latent_conditioning(&self, text_tokens: &[u32], reference: &[Vec<f32>], prompt: &[Vec<f32>]) -> Result<ConditioningPrefillResult> {
-        let acoustic_summary = self.acoustic.as_ref().context("--acoustic is required for latent conditioning")?;
         let plan = conditioning::build_plan(text_tokens, reference, prompt)?;
+        self.prefill_conditioning_plan(&plan)?;
+        Ok(self.conditioning_prefill_result(&plan))
+    }
+
+    fn prefill_conditioning_plan(&self, plan: &conditioning::ConditioningPlan) -> Result<()> {
+        let acoustic_summary = self.acoustic.as_ref().context("--acoustic is required for latent conditioning")?;
         self.reset_pipeline();
         if self.gpu.mode == ExecutionMode::Xtx7900 {
             // Pass 3: record contiguous text-prefix positions from BaseLM and ResidualLM
@@ -538,14 +562,19 @@ impl Runtime {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn conditioning_prefill_result(&self, plan: &conditioning::ConditioningPlan) -> ConditioningPrefillResult {
         let (prefix_condition_checksum, prefix_condition_l2) = stats(&plan.prefix_condition);
-        let status = self.status();
-        Ok(ConditioningPrefillResult {
-            plan: plan.summary,
-            baselm_position: status.baselm.position,
-            residual_position: status.residual_fsq.map(|x| x.residual_position).unwrap_or(0),
+        let baselm_position = self.baselm.lock().unwrap().as_ref().map(|engine| engine.position()).unwrap_or(0);
+        let residual_position = self.acoustic_engine.lock().unwrap().as_ref().map(|engine| engine.position()).unwrap_or(0);
+        ConditioningPrefillResult {
+            plan: plan.summary.clone(),
+            baselm_position,
+            residual_position,
             prefix_condition_checksum, prefix_condition_l2,
-        })
+        }
     }
 
     /// LocDiT estimator using the current BaseLM/ResidualLM hidden states for the two mu tokens.
@@ -586,7 +615,8 @@ impl Runtime {
     /// then generate the next 4x64 acoustic latent patch with UnifiedCFM.
     pub fn prefill_latent_conditioning_and_cfm(&self,text_tokens:&[u32],reference:&[Vec<f32>],prompt:&[Vec<f32>],options:&CfmOptions,initial_x:Option<&[f32]>) -> Result<ConditioningCfmResult> {
         let plan=conditioning::build_plan(text_tokens,reference,prompt)?;
-        let prefill=self.prefill_latent_conditioning(text_tokens,reference,prompt)?;
+        self.prefill_conditioning_plan(&plan)?;
+        let prefill=self.conditioning_prefill_result(&plan);
         let cfm=self.cfm_from_current_hiddens(&plan.prefix_condition,options,initial_x)?;
         Ok(ConditioningCfmResult{prefill,cfm})
     }
@@ -723,12 +753,9 @@ impl Runtime {
         if control.is_some() && (prompt_wav.is_some() || prompt_text.map(str::trim).is_some_and(|x|!x.is_empty())) {
             bail!("VoxCPM2 style control cannot be combined with prompt-audio + prompt-text continuation/ultimate cloning");
         }
-        // VoxCPM2's native style-control contract is textual: `(instruction)` is
-        // prepended to the target text before tokenization. VoxGen-managed style
-        // recipes are compiled into acoustic goals here so every client gets the
-        // same warm/cheerful rendering. Arbitrary custom controls stay verbatim.
-        let effective_control=control.map(|c|refine_control_instruction(c,text));
-        let controlled_text=if let Some(c)=effective_control.as_deref(){format!("({c}){text}")}else{text.to_owned()};
+        // Control text is already final when it reaches Runtime. Managed styles are
+        // compiled by the HTTP/CLI layer; arbitrary custom controls stay verbatim.
+        let controlled_text=if let Some(c)=control{format!("({c}){text}")}else{text.to_owned()};
         let token_text=if prompt_wav.is_some(){format!("{}{}",prompt_text.unwrap_or(""),controlled_text)}else{controlled_text};
         let text_tokens=self.tokenizer.encode(&token_text)?;
         if cancelled() { bail!("speech synthesis cancelled"); }
@@ -747,9 +774,11 @@ impl Runtime {
         let plan=conditioning::build_plan(&text_tokens,&reference,&prompt)?;
         let conditioning_summary=plan.summary.clone();
         let mut condition=plan.prefix_condition.clone();
-        let _prefill=self.prefill_latent_conditioning(&text_tokens,&reference,&prompt)?;
+        self.prefill_conditioning_plan(&plan)?;
         if cancelled() { bail!("speech synthesis cancelled"); }
-        let mut first_pcm_ms=None; let mut generated:Vec<Vec<f32>>=Vec::new(); let mut streamed_samples=Vec::new(); let mut trace=Vec::new(); let mut stopped=false;
+        let streaming = on_pcm.is_some();
+        let mut rolling = Vec::with_capacity(decode_context_patches * 256);
+        let mut first_pcm_ms=None; let mut generated:Vec<Vec<f32>>=Vec::new(); let mut streamed_sample_count=0usize; let mut trace=Vec::new(); let mut stopped=false;
         for step in 0..options.max_steps {
             if cancelled() { bail!("speech synthesis cancelled"); }
             let mut cfm=options.cfm.clone(); cfm.seed=cfm.seed.wrapping_add((step as u64).wrapping_mul(0x9E3779B97F4A7C15));
@@ -760,13 +789,15 @@ impl Runtime {
             generated.push(patch.clone());
             let mut emitted=0usize;
             if on_pcm.is_some(){
-                let mut context:Vec<&Vec<f32>>=decode_prefix.iter().chain(generated.iter()).collect(); if context.len()>decode_context_patches{context.drain(..context.len()-decode_context_patches);}
-                let mut rolling=Vec::with_capacity(context.len()*256);for p in context{rolling.extend_from_slice(p);}
+                rolling.clear();
+                let total_context = decode_prefix.len() + generated.len();
+                let skip = total_context.saturating_sub(decode_context_patches);
+                for p in decode_prefix.iter().chain(generated.iter()).skip(skip) { rolling.extend_from_slice(p); }
                 let (_ds,pcm)=self.audiovae_decode_latents(&rolling)?; let take=7680.min(pcm.len()); let chunk=&pcm[pcm.len()-take..]; emitted=chunk.len();
                 // The stop head decides whether another patch is needed; it cannot
                 // retract the patch we just generated. Publish current PCM first so
                 // socket/client playback can begin while stop prediction follows.
-                if first_pcm_ms.is_none(){first_pcm_ms=Some(started.elapsed().as_secs_f64()*1000.0);} if let Some(cb)=on_pcm.as_mut(){cb(chunk,48000)?;} streamed_samples.extend_from_slice(chunk);
+                if first_pcm_ms.is_none(){first_pcm_ms=Some(started.elapsed().as_secs_f64()*1000.0);} if let Some(cb)=on_pcm.as_mut(){cb(chunk,48000)?;} streamed_sample_count=streamed_sample_count.saturating_add(chunk.len());
             }
             if cancelled() { bail!("speech synthesis cancelled"); }
             let stop=self.predict_stop()?;
@@ -776,10 +807,11 @@ impl Runtime {
             if step+1>=options.max_steps { break; }
             self.advance_generated_patch_gpu_only(&patch)?; condition=patch;
         }
-        let samples=if on_pcm.is_some(){streamed_samples}else{let mut lat=Vec::with_capacity((decode_prefix.len()+generated.len())*256);for p in &decode_prefix{lat.extend_from_slice(p);}for p in &generated{lat.extend_from_slice(p);}let(_ds,pcm)=self.audiovae_decode_latents(&lat)?;let trim=(decode_prefix.len()*7680).min(pcm.len());let pcm=pcm[trim..].to_vec();if first_pcm_ms.is_none(){first_pcm_ms=Some(started.elapsed().as_secs_f64()*1000.0);}pcm};
+        let samples=if streaming{Vec::new()}else{let mut lat=Vec::with_capacity((decode_prefix.len()+generated.len())*256);for p in &decode_prefix{lat.extend_from_slice(p);}for p in &generated{lat.extend_from_slice(p);}let(_ds,pcm)=self.audiovae_decode_latents(&lat)?;let trim=(decode_prefix.len()*7680).min(pcm.len());let pcm=pcm[trim..].to_vec();if first_pcm_ms.is_none(){first_pcm_ms=Some(started.elapsed().as_secs_f64()*1000.0);}pcm};
         if cancelled() { bail!("speech synthesis cancelled"); }
-        let elapsed_ms=started.elapsed().as_secs_f64()*1000.0; let audio_seconds=samples.len() as f64/48000.0; let rtf=if audio_seconds>0.0{elapsed_ms/1000.0/audio_seconds}else{f64::INFINITY};
-        Ok(TtsResult{text:text.to_owned(),control:control.map(str::to_owned),token_count:text_tokens.len(),generated_patches:generated.len(),stopped_by_predictor:stopped,sample_rate:48000,sample_count:samples.len(),audio_seconds,elapsed_ms,rtf,first_pcm_ms,conditioning:conditioning_summary,steps:trace,samples})
+        let sample_count=if streaming{streamed_sample_count}else{samples.len()};
+        let elapsed_ms=started.elapsed().as_secs_f64()*1000.0; let audio_seconds=sample_count as f64/48000.0; let rtf=if audio_seconds>0.0{elapsed_ms/1000.0/audio_seconds}else{f64::INFINITY};
+        Ok(TtsResult{text:text.to_owned(),control:control.map(str::to_owned),token_count:text_tokens.len(),generated_patches:generated.len(),stopped_by_predictor:stopped,sample_rate:48000,sample_count,audio_seconds,elapsed_ms,rtf,first_pcm_ms,conditioning:conditioning_summary,steps:trace,samples})
     }
 
     pub fn benchmark_residual(
@@ -796,8 +828,7 @@ impl Runtime {
     }
 
     pub fn assert_speech_available(&self) -> Result<()> {
-        let st=self.status();
-        if !(st.baselm_inference_ready&&st.residual_lm_inference_ready&&st.locenc_inference_ready&&st.cfm_solver_ready&&st.audiovae_encoder_ready&&st.audiovae_decoder_ready){
+        if !self.speech_inference_ready {
             bail!("VoxGen speech requires BaseLM + acoustic GGUF with ResidualLM/FSQ, LocEnc/LocDiT/CFM, and AudioVAE loaded");
         }
         Ok(())

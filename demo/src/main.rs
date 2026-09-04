@@ -2,7 +2,7 @@
 
 use voxgen::{
     playback_dsp::{OutputPeakGuard, PlaybackControls as NativePlaybackControls, StreamingPlaybackDsp},
-    prosody_control::{build_style_control, managed_style_tuning, refine_control_instruction},
+    prosody_control::{build_style_control, managed_style_tuning, ManagedStyleTuning},
 };
 use serde_json::json;
 use std::{
@@ -1481,17 +1481,17 @@ fn build_demo_expressive_request(
     let raw_control = if clone_mode == "ultimate" {
         None
     } else {
-        build_style_control(preset, intensity, custom)
+        build_style_control(preset, intensity, custom, text)
     };
     if preset == "custom" && clone_mode != "ultimate" && custom.trim().is_empty() {
         return Err("Custom style requires a delivery instruction.".to_string());
     }
-    let tuning = managed_style_tuning(raw_control.as_deref());
-    let control = if managed_style {
-        None
+    let tuning = if managed_style {
+        managed_style_tuning(preset, intensity).unwrap_or_default()
     } else {
-        raw_control.as_deref().map(|raw| refine_control_instruction(raw, text))
+        ManagedStyleTuning::default()
     };
+    let control = if managed_style { None } else { raw_control };
     let cfg_override = if (base_cfg_value - 2.0).abs() <= 0.0005 {
         None
     } else {

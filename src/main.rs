@@ -23,7 +23,7 @@ use local::{CfmOptions, LocalConfig};
 use runtime::{Runtime, TtsOptions};
 use vulkan::{ExecutionMode, XtxTuning};
 use voxgen::playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp};
-use crate::prosody_control::{apply_managed_cfg, build_style_control};
+use crate::prosody_control::{build_style_control, managed_style_tuning};
 use serde_json::json;
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::Instant};
 
@@ -646,7 +646,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cfm_default_cfg = runtime.status().local.as_ref().map(|x|x.config.cfm_cfg_rate).unwrap_or(2.0);
+    let cfm_default_cfg = runtime.default_cfm_cfg_rate();
     let cfm_options = CfmOptions { n_timesteps:args.cfm_steps, cfg_value:args.cfm_cfg.unwrap_or(cfm_default_cfg), temperature:args.cfm_temperature, sway_sampling_coef:args.cfm_sway, seed:args.cfm_seed, use_cfg_zero_star:!args.cfm_no_zero_star };
 
     if let Some(text)=args.text.as_deref(){
@@ -679,25 +679,23 @@ fn main() -> Result<()> {
             bail!("--speed must remain 100 when --style/--pace-percent managed prosody is active; use --pace-percent instead");
         }
         let managed_control = if let Some(style) = args.style.as_deref() {
-            let raw = build_style_control(style, &args.intensity, "")
+            let mut effective = build_style_control(style, &args.intensity, "", text)
                 .ok_or_else(|| anyhow::anyhow!("unsupported --style/--intensity combination"))?;
-            let mut effective = prosody_control::refine_control_instruction(&raw, text);
             if (args.pace_percent - 100.0).abs() >= 0.001 {
-                effective.push_str(&format!(
-                    " Maintain speaking pace around {:.0}% of ordinary conversational pace throughout; treat this as a speaking-rate target, not a pitch shift.",
-                    args.pace_percent
-                ));
+                effective.push_str(&format!(" Speaking pace: {:.0}%.", args.pace_percent));
             }
-            Some((raw, effective))
+            let tuning = managed_style_tuning(style, &args.intensity)
+                .ok_or_else(|| anyhow::anyhow!("unsupported --style/--intensity combination"))?;
+            Some((effective, tuning.cfg_delta))
         } else { None };
-        let effective_control = managed_control.as_ref().map(|(_, effective)| effective.as_str()).or(args.control.as_deref());
+        let effective_control = managed_control.as_ref().map(|(effective, _)| effective.as_str()).or(args.control.as_deref());
         if effective_control.is_some_and(|x|!x.trim().is_empty()) && prompt_wav.is_some(){
             bail!("--control/--style cannot be combined with prompt/ultimate cloning");
         }
         let mut text_cfm_options = cfm_options.clone();
         if args.cfm_cfg.is_none() {
-            if let Some((raw, _)) = managed_control.as_ref() {
-                text_cfm_options.cfg_value = apply_managed_cfg(cfm_default_cfg, Some(raw));
+            if let Some((_, cfg_delta)) = managed_control.as_ref() {
+                text_cfm_options.cfg_value = (cfm_default_cfg + *cfg_delta).clamp(1.0, 3.0);
             }
         }
         let mut reports=Vec::new();
@@ -705,7 +703,10 @@ fn main() -> Result<()> {
             let mut tts=TtsOptions{min_steps:args.min_steps,max_steps:args.max_steps,streaming_prefix_len:args.streaming_prefix_len,cfm:text_cfm_options.clone()};
             if variation>0 { tts.cfm.seed=tts.cfm.seed.wrapping_add((variation as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)); }
             let result=if stream_enabled {
-                runtime.synthesize(text,effective_control,args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,Some(|_chunk:&[f32],_sr:u32|->Result<()>{Ok(())}))?
+                let mut streamed_samples=Vec::new();
+                let mut result=runtime.synthesize(text,effective_control,args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,Some(|chunk:&[f32],_sr:u32|->Result<()>{streamed_samples.extend_from_slice(chunk);Ok(())}))?;
+                result.samples=streamed_samples;
+                result
             } else {
                 runtime.synthesize::<fn(&[f32],u32)->Result<()>>(text,effective_control,args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,None)?
             };

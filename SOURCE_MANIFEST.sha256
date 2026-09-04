@@ -1,13 +1,7 @@
-# VoxGen v0.7.67 source manifest
-# SHA-256 hashes; SOURCE_MANIFEST.txt and SOURCE_MANIFEST.sha256 excluded from the source-file count
-# Latency simplification preserved; historical static Python validators removed
-# Deterministic test_*.f32 fixtures are generated on demand and are not committed
-# Remaining repository smoke validators: validate_build_layout.py, validate_clean_source.py, validate_demo.py
-# Documentation cleanup preserved: root validation/research notes consolidated into HISTORY.md; user README retained verbatim
-# Files: 155
 ce7d6e28c6100141720ce3c5eea57a8df336f48792030749546b0f828db58c52  Cargo.toml
 85eb126f225980fc1f294000149033737b2f0819a645125d9c2e1b1ffc22952c  HISTORY.md
 2fdeab1c1b8e9cf5aa99fb5d2491d004761e4ee05c9334488a25586fa5502eae  README.md
+cb7548c255bfff1a70789349100087ab5741949a86d8984792fcb81e7d333e52  SOURCE_MANIFEST.txt
 31a274e8b3f6cc2bf7a5df9e25d84937a6f78fc52b1d69036813ef60e1674004  build.rs
 02f3e99d4a6676fa6e8aa4d5561ff37c23a6e6c56bf04bf0f04d95bcd511f89d  build_linux/README.md
 5c923cb91330d1fe69e47522b6e09e729e61a53690e6803080dbeaad6a9cbb4c  build_linux/_common.sh
