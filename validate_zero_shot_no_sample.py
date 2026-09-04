@@ -8,8 +8,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in demo_cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in demo_cargo, 'demo version')
 need('if sample.is_none() && expressive.clone_mode == "reference"' in src, 'reference-without-sample fallback guard')
 need('expressive.clone_mode = "auto".to_string();' in src, 'zero-shot clone mode fallback')
 need('No reference sample selected: using zero-shot generation.' in src, 'zero-shot log message')

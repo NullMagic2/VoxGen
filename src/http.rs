@@ -4,16 +4,24 @@ use crate::{
     runtime::{Runtime, TtsOptions},
     vulkan::{ExecutionMode, XtxTuning},
 };
-use voxgen::{
-    playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp, OUTPUT_PEAK_CEILING},
-    prosody_control::apply_managed_cfg,
+use crate::prosody_control::{
+    apply_managed_cfg, build_style_control, build_transition_control_with_speed,
+    managed_style_tuning, managed_transition_cfg_delta, MoodSpeedTransition,
+    MoodTransitionMode, MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT,
+    MAX_MOOD_SPEED_PERCENT, MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT,
+    MIN_MOOD_SPEED_PERCENT,
+};
+use voxgen::playback_dsp::{
+    OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp, OUTPUT_PEAK_CEILING,
 };
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
     fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
@@ -22,12 +30,13 @@ use std::{
         Arc, Mutex, RwLock,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpeechRequest {
     #[serde(alias = "text")]
     input: String,
@@ -35,6 +44,16 @@ struct SpeechRequest {
     prompt_text: Option<String>,
     #[serde(default)]
     control: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    intensity: Option<String>,
+    #[serde(default)]
+    pace_percent: Option<f32>,
+    #[serde(default)]
+    continuity_id: Option<String>,
+    #[serde(default)]
+    boundary: Option<String>,
     #[serde(default)]
     clone_mode: Option<String>,
     #[serde(default)]
@@ -75,10 +94,79 @@ struct SpeechRequest {
     request_id: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuityBoundary {
+    Continuous,
+    HardCut,
+}
+
+impl ContinuityBoundary {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("continuous").trim().to_ascii_lowercase().as_str() {
+            "continuous" => Ok(Self::Continuous),
+            "hard_cut" | "hard-cut" => Ok(Self::HardCut),
+            other => bail!("boundary must be continuous or hard_cut, got {other:?}"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Continuous => "continuous",
+            Self::HardCut => "hard_cut",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManagedDestination {
+    style: String,
+    intensity: String,
+    requested_pace_percent: f32,
+    continuity_id: Option<String>,
+    boundary: ContinuityBoundary,
+}
+
+#[derive(Debug, Clone)]
+struct ContinuityState {
+    style: String,
+    intensity: String,
+    pace_percent: f32,
+    speaker_key: String,
+    updated_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct ContinuityStore {
+    sessions: HashMap<String, ContinuityState>,
+    id_generations: HashMap<String, u64>,
+    global_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ContinuityPlan {
+    destination: ManagedDestination,
+    previous: Option<ContinuityState>,
+    effective_pace_percent: f32,
+    effective_control: String,
+    cfg_delta: f32,
+    speaker_key: String,
+    global_generation: u64,
+    id_generation: u64,
+}
+
+const CONTINUITY_TTL: Duration = Duration::from_secs(30 * 60);
+const MAX_CONTINUITY_SESSIONS: usize = 256;
+
 #[derive(Debug, Deserialize, Default)]
 struct SpeechCancelRequest {
     #[serde(default)]
     request_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuityResetRequest {
+    continuity_id: String,
 }
 
 /// Server-side model selection. Paths are paths on the machine running VoxGen,
@@ -112,6 +200,7 @@ struct ServerState {
     cancel_speech: AtomicBool,
     active_speech_request: AtomicU64,
     cancel_speech_request: AtomicU64,
+    continuity: Mutex<ContinuityStore>,
     streaming_enabled: bool,
     default_gain: f32,
     default_base_format: Option<BaseFormat>,
@@ -139,6 +228,7 @@ impl ServerState {
             cancel_speech: AtomicBool::new(false),
             active_speech_request: AtomicU64::new(0),
             cancel_speech_request: AtomicU64::new(0),
+            continuity: Mutex::new(ContinuityStore::default()),
             streaming_enabled,
             default_gain,
             default_base_format,
@@ -147,6 +237,27 @@ impl ServerState {
             default_xtx_tuning,
             default_max_context,
         }
+    }
+
+    fn clear_continuity(&self) -> Result<()> {
+        let mut store = self
+            .continuity
+            .lock()
+            .map_err(|_| anyhow::anyhow!("VoxGen continuity state lock is poisoned"))?;
+        store.global_generation = store.global_generation.wrapping_add(1);
+        store.sessions.clear();
+        Ok(())
+    }
+
+    fn reset_continuity_id(&self, continuity_id: &str) -> Result<bool> {
+        let mut store = self
+            .continuity
+            .lock()
+            .map_err(|_| anyhow::anyhow!("VoxGen continuity state lock is poisoned"))?;
+        let removed = store.sessions.remove(continuity_id).is_some();
+        let generation = store.id_generations.entry(continuity_id.to_owned()).or_insert(0);
+        *generation = generation.wrapping_add(1);
+        Ok(removed)
     }
 
     fn runtime_snapshot(&self) -> Result<Option<Arc<Runtime>>> {
@@ -311,6 +422,74 @@ fn audio_path(
     Ok(Some(p))
 }
 
+fn normalize_style(value: &str) -> Result<String> {
+    let normalized = match value.trim().to_ascii_lowercase().as_str() {
+        "neutral" => "neutral",
+        "warm" => "warm",
+        "cheerful" => "cheerful",
+        "excited" => "excited",
+        "sad" => "sad",
+        "concerned" => "concerned",
+        "angry" => "angry",
+        "gentle" => "gentle",
+        "serious" => "serious",
+        "whisper" | "whisper-like" | "whisper_like" => "whisper",
+        other => bail!("unsupported style {other:?}; use neutral, warm, cheerful, excited, sad, concerned, angry, gentle, serious, or whisper"),
+    };
+    Ok(normalized.to_owned())
+}
+
+fn normalize_intensity(value: Option<&str>) -> Result<String> {
+    let normalized = match value.unwrap_or("normal").trim().to_ascii_lowercase().as_str() {
+        "subtle" => "subtle",
+        "normal" | "medium" => "normal",
+        "strong" => "strong",
+        other => bail!("unsupported intensity {other:?}; use subtle, normal, or strong"),
+    };
+    Ok(normalized.to_owned())
+}
+
+fn parse_managed_destination(req: &SpeechRequest) -> Result<Option<ManagedDestination>> {
+    let has_control = req.control.as_deref().is_some_and(|x| !x.trim().is_empty());
+    if req.style.is_some() && has_control {
+        bail!("style cannot be combined with control");
+    }
+    if req.style.is_none() {
+        if req.intensity.is_some() || req.pace_percent.is_some() || req.continuity_id.is_some() || req.boundary.is_some() {
+            bail!("intensity, pace_percent, continuity_id, and boundary require style");
+        }
+        return Ok(None);
+    }
+
+    let style = normalize_style(req.style.as_deref().unwrap_or_default())?;
+    let intensity = normalize_intensity(req.intensity.as_deref())?;
+    let pace_percent = req.pace_percent.unwrap_or(100.0);
+    if !pace_percent.is_finite() || !(MIN_MOOD_SPEED_PERCENT..=MAX_MOOD_SPEED_PERCENT).contains(&pace_percent) {
+        bail!("pace_percent must be finite and between {MIN_MOOD_SPEED_PERCENT:.0} and {MAX_MOOD_SPEED_PERCENT:.0}");
+    }
+    let continuity_id = req.continuity_id.as_deref().map(str::trim).filter(|x| !x.is_empty()).map(str::to_owned);
+    if req.continuity_id.is_some() && continuity_id.is_none() {
+        bail!("continuity_id cannot be empty");
+    }
+    if continuity_id.as_deref().is_some_and(|id| id.len() > 128) {
+        bail!("continuity_id must be at most 128 bytes");
+    }
+    if req.boundary.is_some() && continuity_id.is_none() {
+        bail!("boundary requires continuity_id");
+    }
+    let boundary = ContinuityBoundary::parse(req.boundary.as_deref())?;
+    if continuity_id.is_some() && (req.speed_percent.unwrap_or(100.0) - 100.0).abs() > 1.0e-4 {
+        bail!("speed_percent must remain 100 while continuity_id is active; use pace_percent so VoxGen owns pace continuity");
+    }
+    if (pace_percent - 100.0).abs() > 1.0e-4 && (req.speed_percent.unwrap_or(100.0) - 100.0).abs() > 1.0e-4 {
+        bail!("speed_percent and managed pace_percent cannot both change speaking rate; leave speed_percent at 100");
+    }
+    let raw = build_style_control(&style, &intensity, "")
+        .ok_or_else(|| anyhow::anyhow!("unsupported style/intensity combination"))?;
+    let _ = raw;
+    Ok(Some(ManagedDestination { style, intensity, requested_pace_percent: pace_percent, continuity_id, boundary }))
+}
+
 fn parse_speech_request(body: &[u8]) -> Result<SpeechRequest> {
     let req: SpeechRequest = serde_json::from_slice(body).context("parse speech request JSON")?;
     if req.input.trim().is_empty() {
@@ -334,29 +513,210 @@ fn parse_speech_request(body: &[u8]) -> Result<SpeechRequest> {
         }
         _ => bail!("clone_mode must be auto, reference/controllable, or ultimate"),
     }
-    if req.control.as_deref().is_some_and(|x| !x.trim().is_empty())
+    let managed = parse_managed_destination(&req)?;
+    if (req.control.as_deref().is_some_and(|x| !x.trim().is_empty()) || managed.is_some())
         && (has_prompt || has_prompt_text || clone_mode == "ultimate")
     {
-        bail!("control cannot be combined with ultimate/prompt continuation cloning");
+        bail!("control/style cannot be combined with ultimate/prompt continuation cloning");
+    }
+    match req.response_format.as_deref().unwrap_or("wav") {
+        "wav" | "pcm" | "f32" => {}
+        x => bail!("unsupported response_format {x:?}; use wav or pcm"),
     }
     Ok(req)
 }
 
-fn options(runtime: &Runtime, r: &SpeechRequest) -> TtsOptions {
+fn speaker_conditioning_key(req: &SpeechRequest) -> String {
+    let mut hasher = DefaultHasher::new();
+    if let Some(raw) = req.reference_audio.as_deref().filter(|x| !x.trim().is_empty()) {
+        "inline-reference".hash(&mut hasher);
+        raw.hash(&mut hasher);
+        return format!("inline:{:016x}", hasher.finish());
+    }
+    if let Some(path) = req.reference_audio_path.as_ref() {
+        "path-reference".hash(&mut hasher);
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        canonical.to_string_lossy().hash(&mut hasher);
+        if let Ok(metadata) = fs::metadata(&canonical) {
+            metadata.len().hash(&mut hasher);
+            if let Ok(modified) = metadata.modified() { modified.hash(&mut hasher); }
+        }
+        return format!("path:{:016x}", hasher.finish());
+    }
+    "none".to_owned()
+}
+
+fn append_pace_hold(control: &mut String, pace_percent: f32) {
+    if (pace_percent - 100.0).abs() >= 0.001 {
+        control.push_str(&format!(
+            " Maintain speaking pace around {:.0}% of ordinary conversational pace throughout; treat this as a speaking-rate target, not a pitch shift.",
+            pace_percent
+        ));
+    }
+}
+
+fn destination_control(destination: &ManagedDestination, text: &str, pace_percent: f32) -> Result<(String, f32)> {
+    let raw = build_style_control(&destination.style, &destination.intensity, "")
+        .ok_or_else(|| anyhow::anyhow!("unsupported style/intensity combination"))?;
+    let mut effective = crate::prosody_control::refine_control_instruction(&raw, text);
+    append_pace_hold(&mut effective, pace_percent);
+    Ok((effective, managed_style_tuning(Some(&raw)).cfg_delta))
+}
+
+fn continuity_plan(state: &ServerState, req: &SpeechRequest, destination: ManagedDestination, speaker_key: String) -> Result<ContinuityPlan> {
+    let Some(continuity_id) = destination.continuity_id.as_deref() else {
+        let effective_pace_percent = destination.requested_pace_percent;
+        let (effective_control, cfg_delta) = destination_control(&destination, &req.input, effective_pace_percent)?;
+        return Ok(ContinuityPlan {
+            destination,
+            previous: None,
+            effective_pace_percent,
+            effective_control,
+            cfg_delta,
+            speaker_key,
+            global_generation: 0,
+            id_generation: 0,
+        });
+    };
+
+    let mut store = state
+        .continuity
+        .lock()
+        .map_err(|_| anyhow::anyhow!("VoxGen continuity state lock is poisoned"))?;
+    let now = Instant::now();
+    store.sessions.retain(|_, session| now.duration_since(session.updated_at) <= CONTINUITY_TTL);
+    let global_generation = store.global_generation;
+    let id_generation = *store.id_generations.get(continuity_id).unwrap_or(&0);
+    let previous = store.sessions.get(continuity_id)
+        .filter(|prior| prior.speaker_key == speaker_key)
+        .cloned();
+    drop(store);
+
+    let effective_pace_percent = if let Some(prior) = previous.as_ref() {
+        let delta = destination.requested_pace_percent - prior.pace_percent;
+        let magnitude = delta.abs();
+        if magnitude < MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT {
+            prior.pace_percent
+        } else if magnitude > MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT {
+            prior.pace_percent + delta.signum() * MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT
+        } else {
+            destination.requested_pace_percent
+        }
+    } else {
+        destination.requested_pace_percent
+    };
+
+    let (effective_control, cfg_delta) = if let Some(prior) = previous.as_ref() {
+        let style_changed = prior.style != destination.style;
+        let intensity_changed = prior.intensity != destination.intensity;
+        let pace_changed = (prior.pace_percent - effective_pace_percent).abs() >= MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT;
+        let keep_nondefault_pace = effective_pace_percent != 100.0;
+        let should_transition = intensity_changed || pace_changed || (style_changed && destination.boundary == ContinuityBoundary::Continuous);
+
+        if should_transition {
+            let (from_style, from_intensity) = if style_changed && destination.boundary == ContinuityBoundary::HardCut {
+                (destination.style.as_str(), prior.intensity.as_str())
+            } else {
+                (prior.style.as_str(), prior.intensity.as_str())
+            };
+            let speed = if pace_changed || keep_nondefault_pace {
+                Some(MoodSpeedTransition::new(prior.pace_percent, effective_pace_percent).map_err(anyhow::Error::msg)?)
+            } else {
+                None
+            };
+            let control = build_transition_control_with_speed(
+                from_style,
+                from_intensity,
+                &destination.style,
+                &destination.intensity,
+                MoodTransitionMode::Gradual,
+                speed,
+                &req.input,
+            ).map_err(anyhow::Error::msg)?;
+            let delta = managed_transition_cfg_delta(
+                from_style,
+                from_intensity,
+                &destination.style,
+                &destination.intensity,
+            ).map_err(anyhow::Error::msg)?;
+            (control, delta)
+        } else {
+            destination_control(&destination, &req.input, effective_pace_percent)?
+        }
+    } else {
+        destination_control(&destination, &req.input, effective_pace_percent)?
+    };
+
+    Ok(ContinuityPlan {
+        destination,
+        previous,
+        effective_pace_percent,
+        effective_control,
+        cfg_delta,
+        speaker_key,
+        global_generation,
+        id_generation,
+    })
+}
+
+fn commit_continuity(state: &ServerState, plan: &ContinuityPlan) -> Result<bool> {
+    let Some(continuity_id) = plan.destination.continuity_id.as_deref() else { return Ok(false); };
+    let mut store = state
+        .continuity
+        .lock()
+        .map_err(|_| anyhow::anyhow!("VoxGen continuity state lock is poisoned"))?;
+    if store.global_generation != plan.global_generation
+        || *store.id_generations.get(continuity_id).unwrap_or(&0) != plan.id_generation
+    {
+        return Ok(false);
+    }
+    let now = Instant::now();
+    store.sessions.retain(|_, session| now.duration_since(session.updated_at) <= CONTINUITY_TTL);
+    if !store.sessions.contains_key(continuity_id) && store.sessions.len() >= MAX_CONTINUITY_SESSIONS {
+        if let Some(oldest) = store.sessions.iter().min_by_key(|(_, session)| session.updated_at).map(|(id, _)| id.clone()) {
+            store.sessions.remove(&oldest);
+        }
+    }
+    store.sessions.insert(continuity_id.to_owned(), ContinuityState {
+        style: plan.destination.style.clone(),
+        intensity: plan.destination.intensity.clone(),
+        pace_percent: plan.effective_pace_percent,
+        speaker_key: plan.speaker_key.clone(),
+        updated_at: now,
+    });
+    Ok(true)
+}
+
+fn continuity_headers(plan: Option<&ContinuityPlan>) -> Vec<(&'static str, String)> {
+    let Some(plan) = plan else { return Vec::new(); };
+    let previous = plan.previous.as_ref();
+    vec![
+        ("X-VoxGen-Previous-Style", previous.map(|x| x.style.clone()).unwrap_or_else(|| "none".to_owned())),
+        ("X-VoxGen-Effective-Style", plan.destination.style.clone()),
+        ("X-VoxGen-Previous-Intensity", previous.map(|x| x.intensity.clone()).unwrap_or_else(|| "none".to_owned())),
+        ("X-VoxGen-Effective-Intensity", plan.destination.intensity.clone()),
+        ("X-VoxGen-Previous-Pace-Percent", previous.map(|x| format!("{:.3}", x.pace_percent)).unwrap_or_else(|| "none".to_owned())),
+        ("X-VoxGen-Effective-Pace-Percent", format!("{:.3}", plan.effective_pace_percent)),
+        ("X-VoxGen-Requested-Pace-Percent", format!("{:.3}", plan.destination.requested_pace_percent)),
+        ("X-VoxGen-Boundary", plan.destination.boundary.as_str().to_owned()),
+    ]
+}
+
+fn options(runtime: &Runtime, r: &SpeechRequest, effective_control: Option<&str>, managed_cfg_delta: Option<f32>) -> Result<TtsOptions> {
     let cfg = runtime
         .status()
         .local
         .as_ref()
         .map(|x| x.config.cfm_cfg_rate)
         .unwrap_or(2.0);
-    // An explicitly supplied cfg_value is authoritative. When clients leave
-    // CFG unspecified, give VoxGen-managed low-arousal styles a small guidance
-    // lift so warmth/gentleness does not collapse back into neutral speech.
     let cfg_value = match r.cfg_value {
         Some(explicit) => explicit,
-        None => apply_managed_cfg(cfg, r.control.as_deref()),
+        None => match managed_cfg_delta {
+            Some(delta) => (cfg + delta).clamp(1.0, 3.0),
+            None => apply_managed_cfg(cfg, effective_control),
+        },
     };
-    TtsOptions {
+    Ok(TtsOptions {
         min_steps: r.min_steps.unwrap_or(2),
         max_steps: r.max_steps.unwrap_or(200),
         streaming_prefix_len: r.streaming_prefix_len.unwrap_or(6),
@@ -368,7 +728,7 @@ fn options(runtime: &Runtime, r: &SpeechRequest) -> TtsOptions {
             seed: r.seed.unwrap_or(42),
             use_cfg_zero_star: r.cfg_zero_star.unwrap_or(true),
         },
-    }
+    })
 }
 
 fn wav_header_f32(sample_rate: u32, data_bytes: u32) -> Vec<u8> {
@@ -467,7 +827,7 @@ fn health_json(state: &ServerState) -> Result<Value> {
         "native_playback_dsp": true,
         "native_managed_prosody": true,
         "managed_prosody": {
-            "version": 8,
+            "version": 10,
             "profiles": ["neutral", "warm", "cheerful", "excited", "concerned", "angry", "gentle", "whisper", "serious", "sad"],
             "neutral_semantics": "natural-linguistic-prosody-without-imposed-affect-not-flatness",
             "warmth_semantics": "low-arousal-affiliative-tender",
@@ -481,7 +841,29 @@ fn health_json(state: &ServerState) -> Result<Value> {
             "sad_semantics": "low-arousal-lower-narrower-softer-slower-not-grief-or-sleepiness",
             "managed_cfg_guidance": {"warm_delta": 0.20, "gentle_subtle_delta": 0.10, "gentle_normal_strong_delta": 0.15, "subtle_cheerful_delta": 0.10, "concerned_delta": 0.10, "whisper_delta": 0.10, "sad_delta": 0.10, "serious_subtle_delta": 0.05, "serious_normal_strong_delta": 0.10, "excited_delta": 0.0, "angry_delta": 0.0, "explicit_cfg_preserved": true},
             "short_utterance_guard": true,
-            "custom_controls_preserved": true
+            "custom_controls_preserved": true,
+            "automatic_continuity": {
+                "enabled": true,
+                "request_model": "destination-only",
+                "explicit_transition_api": false,
+                "boundaries": ["continuous", "hard_cut"],
+                "hard_cut_semantics": "style-may-cut-intensity-and-pace-still-smooth",
+                "single_pass_synthesis": true,
+                "waveform_crossfade": false,
+                "state_ttl_seconds": CONTINUITY_TTL.as_secs(),
+                "max_active_sessions": MAX_CONTINUITY_SESSIONS,
+                "state_commit": "successful-synthesis-only",
+                "speaker_conditioning_scoped": true,
+                "pace": {
+                    "min_percent": MIN_MOOD_SPEED_PERCENT,
+                    "max_percent": MAX_MOOD_SPEED_PERCENT,
+                    "suppress_delta_below_percent_points": MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT,
+                    "max_advance_per_phrase_percent_points": MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT,
+                    "realization": "single-pass-prosody-conditioning-not-midstream-wsola",
+                    "continuity_playback_speed_requirement": 100.0
+                },
+                "reset_endpoint": "/v1/audio/continuity/reset"
+            }
         },
         "playback_dsp": {
             "algorithm": "sinc+speech-wsola-ncc-confidence+peak-guard",
@@ -539,6 +921,7 @@ fn load_model(state: &ServerState, body: &[u8]) -> Result<Value> {
         slot.take()
     };
     drop(old);
+    state.clear_continuity()?;
 
     let loaded = Runtime::load(
         &request.base_lm,
@@ -583,6 +966,7 @@ fn unload_model(state: &ServerState) -> Result<Value> {
         slot.take()
     };
     drop(old);
+    state.clear_continuity()?;
     Ok(json!({"ok": true, "loaded": false, "speech_inference_ready": false}))
 }
 
@@ -605,8 +989,9 @@ fn runtime_or_503(s: TcpStream, state: &ServerState) -> Result<Option<(TcpStream
 }
 
 fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streaming: bool) -> Result<()> {
-    // Serialize synthesis against model reload/unload. Runtime's internal locks
-    // still govern its component pipeline; this gate is specifically lifecycle safety.
+    // Serialize synthesis against model reload/unload. Continuity reset intentionally
+    // does not take this gate; generation epochs prevent an in-flight request from
+    // recreating a session that was explicitly reset while synthesis was running.
     let _inference = state
         .inference_gate
         .lock()
@@ -614,6 +999,16 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
     let Some((_stream, runtime)) = runtime_or_503(s.try_clone()?, &state)? else {
         return Ok(());
     };
+
+    let speaker_key = speaker_conditioning_key(&req);
+    let managed_destination = parse_managed_destination(&req)?;
+    let continuity = managed_destination
+        .map(|destination| continuity_plan(&state, &req, destination, speaker_key))
+        .transpose()?;
+    let effective_control = continuity
+        .as_ref()
+        .map(|plan| plan.effective_control.as_str())
+        .or_else(|| req.control.as_deref());
 
     let mut temps = Temps(Vec::new());
     let ref_path = audio_path(
@@ -649,10 +1044,16 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
         }
         _ => bail!("clone_mode must be auto, reference/controllable, or ultimate"),
     }
-    if req.control.as_deref().is_some_and(|x|!x.trim().is_empty()) && prompt_path.is_some() {
-        bail!("control cannot be combined with ultimate/prompt continuation cloning");
+    if effective_control.is_some_and(|x| !x.trim().is_empty()) && prompt_path.is_some() {
+        bail!("control/style cannot be combined with ultimate/prompt continuation cloning");
     }
-    let opt = options(&runtime, &req);
+
+    let opt = options(
+        &runtime,
+        &req,
+        effective_control,
+        continuity.as_ref().map(|plan| plan.cfg_delta),
+    )?;
     let gain = req.gain.unwrap_or(state.default_gain);
     if !gain.is_finite() || gain < 0.0 {
         bail!("speech gain must be a finite value >= 0.0");
@@ -679,16 +1080,17 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
     if streaming {
         write!(
             s,
-            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-VoxGen-Sample-Rate: 48000\r\nX-VoxGen-Native-Playback-DSP: 1\r\nX-VoxGen-Peak-Guard: 0.980\r\nX-VoxGen-Speed-Percent: {:.3}\r\nX-VoxGen-Pitch-Semitones: {:+.3}\r\nX-VoxGen-CFG: {:.3}\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-VoxGen-Sample-Rate: 48000\r\nX-VoxGen-Native-Playback-DSP: 1\r\nX-VoxGen-Peak-Guard: 0.980\r\nX-VoxGen-Speed-Percent: {:.3}\r\nX-VoxGen-Pitch-Semitones: {:+.3}\r\nX-VoxGen-CFG: {:.3}\r\n",
             playback_controls.speed_percent,
             playback_controls.pitch_semitones,
             opt.cfm.cfg_value
         )?;
+        for (name, value) in continuity_headers(continuity.as_ref()) {
+            write!(s, "{name}: {value}\r\n")?;
+        }
+        s.write_all(b"\r\n")?;
         // Streaming length is unknown until stop prediction fires. 0xffffffff is the conventional streaming sentinel.
         write_chunk(&mut s, &wav_header_f32(48000, u32::MAX))?;
-        // Keep socket I/O off the inference thread. A small bounded queue allows the GPU
-        // pipeline to run ahead of ordinary localhost/network write latency while preserving
-        // backpressure if a client genuinely cannot consume audio fast enough.
         let (pcm_tx, pcm_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
         let mut writer_stream = s.try_clone().context("clone streaming socket")?;
         let writer = thread::spawn(move || -> Result<()> {
@@ -702,7 +1104,7 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
         let mut peak_guard = OutputPeakGuard::new(48_000).map_err(anyhow::Error::msg)?;
         let synth = runtime.synthesize_cancelable(
             &req.input,
-            req.control.as_deref(),
+            effective_control,
             req.prompt_text.as_deref(),
             ref_path.as_deref(),
             prompt_path.as_deref(),
@@ -732,11 +1134,8 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
         let writer_result = writer
             .join()
             .map_err(|_| anyhow::anyhow!("streaming audio writer thread panicked"))?;
+        // A cancelled stream is a normal control-flow event: do not commit continuity state.
         if state.cancel_speech.load(Ordering::Acquire) {
-            // A cancelled stream is a normal control-flow event. The writer has
-            // already drained any bytes produced before the safe cancellation
-            // boundary; terminate chunked transfer cleanly instead of surfacing a
-            // noisy server error for the Stop button.
             let _ = synth;
             let _ = writer_result;
             s.write_all(b"0\r\n\r\n")?;
@@ -745,13 +1144,16 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
         }
         synth?;
         writer_result?;
+        if let Some(plan) = continuity.as_ref() {
+            let _ = commit_continuity(&state, plan)?;
+        }
         s.write_all(b"0\r\n\r\n")?;
         s.flush()?;
         Ok(())
     } else {
         let result = match runtime.synthesize_cancelable::<fn(&[f32], u32) -> Result<()>>(
             &req.input,
-            req.control.as_deref(),
+            effective_control,
             req.prompt_text.as_deref(),
             ref_path.as_deref(),
             prompt_path.as_deref(),
@@ -770,7 +1172,10 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
         let protected_samples = OutputPeakGuard::process_all(48_000, &rendered_samples, gain)
             .map_err(anyhow::Error::msg)?;
         let rendered_audio_seconds = protected_samples.len() as f64 / 48_000.0;
-        let headers = [
+        if let Some(plan) = continuity.as_ref() {
+            let _ = commit_continuity(&state, plan)?;
+        }
+        let mut headers = vec![
             ("X-VoxGen-Generated-Patches", result.generated_patches.to_string()),
             ("X-VoxGen-Stopped-By-Predictor", result.stopped_by_predictor.to_string()),
             ("X-VoxGen-Audio-Seconds", format!("{:.6}", rendered_audio_seconds)),
@@ -782,6 +1187,7 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
             ("X-VoxGen-First-PCM-Ms", format!("{:.3}", result.first_pcm_ms.unwrap_or_default())),
             ("X-VoxGen-RTF", format!("{:.6}", result.rtf)),
         ];
+        headers.extend(continuity_headers(continuity.as_ref()));
         match req.response_format.as_deref().unwrap_or("wav") {
             "wav" => send_with_headers(s, "200 OK", "audio/wav", &wav_bytes(&protected_samples), &headers),
             "pcm" | "f32" => send_with_headers(
@@ -791,7 +1197,7 @@ fn speech(mut s: TcpStream, state: Arc<ServerState>, req: SpeechRequest, streami
                 &pcm_bytes(&protected_samples),
                 &headers,
             ),
-            x => bail!("unsupported response_format {x:?}; use wav or pcm"),
+            _ => unreachable!("response_format validated before synthesis"),
         }
     }
 }
@@ -821,6 +1227,20 @@ fn handle(mut s: TcpStream, state: Arc<ServerState>) -> Result<()> {
                 std::process::exit(0);
             });
             Ok(())
+        }
+        ("POST", "/v1/audio/continuity/reset") => {
+            // Do not take inference_gate: a reset must invalidate an in-flight
+            // synthesis immediately. commit_continuity checks this ID generation.
+            let reset: ContinuityResetRequest = match serde_json::from_slice(&body) {
+                Ok(value) => value,
+                Err(err) => return send_json(s, "400 Bad Request", json!({"ok": false, "error": format!("invalid continuity reset request: {err}")})),
+            };
+            let continuity_id = reset.continuity_id.trim();
+            if continuity_id.is_empty() || continuity_id.len() > 128 {
+                return send_json(s, "400 Bad Request", json!({"ok": false, "error": "continuity_id must contain 1..=128 bytes"}));
+            }
+            let removed = state.reset_continuity_id(continuity_id)?;
+            send_json(s, "200 OK", json!({"ok": true, "continuity_id": continuity_id, "reset": true, "had_state": removed}))
         }
         ("POST", "/v1/audio/speech/cancel") => {
             // Deliberately do not take inference_gate here: the endpoint must stay
@@ -949,6 +1369,7 @@ fn handle(mut s: TcpStream, state: Arc<ServerState>) -> Result<()> {
                 return Ok(());
             };
             runtime.reset_pipeline();
+            state.clear_continuity()?;
             send_json(
                 s,
                 "200 OK",

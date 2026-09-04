@@ -10,8 +10,8 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in cargo, 'demo version')
 need('struct StreamingSincResampler' in src, 'streaming sinc resampler')
 need('if sample.is_finite() { sample } else { 0.0 }' in src, 'DSP finite sanitizer')
 need('let cutoff = (1.0 / self.factor.max(1.0)).min(1.0);' in src, 'anti-alias cutoff')

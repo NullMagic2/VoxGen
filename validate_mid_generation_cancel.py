@@ -8,7 +8,7 @@ http = (root / 'src' / 'http.rs').read_text(encoding='utf-8')
 runtime = (root / 'src' / 'runtime.rs').read_text(encoding='utf-8')
 
 checks = {
-    'root/demo version 0.7.37': 'version = "0.7.55"' in root_cargo and 'version = "0.7.55"' in demo_cargo,
+    'root/demo version 0.7.37': 'version = "0.7.60"' in root_cargo and 'version = "0.7.60"' in demo_cargo,
     'Stop button exists': 'with_label("Stop")' in demo and 'stop_button.enable(false)' in demo,
     'Stop flushes WinMM': 'waveOutReset(raw as HWaveOut)' in demo,
     'Stop requests server cancellation': 'cancel_active_server_speech(request_id)' in demo and '/v1/audio/speech/cancel' in demo,

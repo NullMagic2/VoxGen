@@ -13,4 +13,4 @@ need('#[arg(long = "pitch", default_value_t = 0.0)]' in main, '--pitch CLI flag'
 need('--speed-percent' not in main, 'no --speed-percent alias in CLI source')
 need('--pitch-semitones' not in main, 'no --pitch-semitones alias in CLI source')
 need('`--speed`' in readme and '`--pitch`' in readme, 'README documents concise flags')
-print('v0.7.55 CLI playback flag validation passed')
+print('v0.7.60 CLI playback flag validation passed')

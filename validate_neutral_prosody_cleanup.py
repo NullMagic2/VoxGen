@@ -11,7 +11,7 @@ def need(cond, msg):
     if not cond:
         raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.55"' in cargo and 'version = "0.7.55"' in demo, "v0.7.55 package versions")
+need('version = "0.7.60"' in cargo and 'version = "0.7.60"' in demo, "v0.7.60 package versions")
 need('fn neutral_profile(' in prosody, "dedicated Neutral compiler")
 need('fn short_neutral_guard(' in prosody, "Neutral short-line guard")
 need('Neutral, natural conversational speech with no deliberately imposed emotional colour.' in prosody, "normal Neutral target")
@@ -24,7 +24,7 @@ need('managed_neutral' in prosody, "managed Neutral recognition")
 need('natural, conversational and emotionally balanced' in prosody, "legacy Normal Neutral compatibility")
 need('clear, composed and deliberately neutral' in prosody, "legacy Strong Neutral compatibility")
 need('ManagedStyleTuning::default()' in prosody, "neutral/default tuning remains available")
-need('"version": 8' in http, "managed prosody v8 health metadata")
+need('"version": 10' in http, "managed prosody v10 health metadata")
 need('"neutral"' in http and 'natural-linguistic-prosody-without-imposed-affect-not-flatness' in http, "Neutral health semantics")
 need('Neutral receives **no automatic CFG delta and no demo gain multiplier**' in readme, "README Neutral tuning policy")
-print("v0.7.55 Neutral prosody cleanup validation passed")
+print("v0.7.60 Neutral prosody cleanup validation passed")

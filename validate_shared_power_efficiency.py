@@ -15,7 +15,7 @@ base = (root/'src'/'baselm.rs').read_text()
 acoustic = (root/'src'/'acoustic.rs').read_text()
 local = (root/'src'/'local.rs').read_text()
 
-need('version = "0.7.55"' in root_cargo and 'version = "0.7.55"' in demo_cargo, 'root/demo version 0.7.37')
+need('version = "0.7.60"' in root_cargo and 'version = "0.7.60"' in demo_cargo, 'root/demo version 0.7.37')
 
 for name in [
     'residual_rmsnorm.comp', 'residual_rmsnorm_xtx7900.comp',

@@ -16,7 +16,7 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in cargo and 'version = "0.7.55"' in demo_cargo, 'v0.7.55 package versions')
+need('version = "0.7.60"' in cargo and 'version = "0.7.60"' in demo_cargo, 'v0.7.60 package versions')
 
 # One authoritative guard after all engine playback DSP.
 need('pub const OUTPUT_PEAK_CEILING: f32 = 0.98;' in dsp, '0.98 output ceiling')
@@ -66,4 +66,4 @@ alpha = 1.0 - math.exp(-seconds / 0.250)
 released = current + (required - current) * alpha
 need(current < released < required, 'stream guard releases smoothly without overshoot')
 
-print('v0.7.55 all-style clipping/metallic safety validation passed')
+print('v0.7.60 all-style clipping/metallic safety validation passed')

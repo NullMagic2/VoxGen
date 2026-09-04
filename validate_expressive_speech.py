@@ -13,8 +13,8 @@ readme=(root/'README.md').read_text()
 def need(c,m):
     if not c: raise AssertionError(m)
 
-need('version = "0.7.55"' in root_cargo,'root version')
-need('version = "0.7.55"' in demo_cargo,'demo version')
+need('version = "0.7.60"' in root_cargo,'root version')
+need('version = "0.7.60"' in demo_cargo,'demo version')
 
 # Native VoxCPM2 textual control, without rewriting the user's target text.
 for token in [
@@ -40,7 +40,7 @@ for token in [
     'visible_alias = "temperature"',
     'visible_alias = "seed"',
 ]: need(token in main, f'CLI expressive contract: {token}')
-need('--control cannot be combined with prompt/ultimate cloning' in main,'CLI mode exclusion')
+need('--control/--style cannot be combined with prompt/ultimate cloning' in main,'CLI mode exclusion')
 
 # HTTP mirrors the engine controls.
 for token in [

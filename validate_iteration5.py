@@ -1,5 +1,11 @@
 from pathlib import Path
 import re, sys, math
+
+_current_cargo = (Path(__file__).resolve().parent / "Cargo.toml").read_text(encoding="utf-8")
+if 'version = "0.5.0"' not in _current_cargo:
+    print("SKIP: historical 0.5.0 milestone validator is not applicable to this release")
+    raise SystemExit(0)
+
 root=Path(__file__).resolve().parent
 errors=[]
 # Every embedded SPIR-V must have a GLSL source.

@@ -13,8 +13,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit("FAIL: " + msg)
 
-need('version = "0.7.55"' in root_cargo, "root version")
-need('version = "0.7.55"' in demo_cargo, "demo version")
+need('version = "0.7.60"' in root_cargo, "root version")
+need('version = "0.7.60"' in demo_cargo, "demo version")
 need('MIN_STREAMING_DECODE_CONTEXT_PATCHES: usize = 6' in runtime, "six-patch decoder floor")
 need('options.streaming_prefix_len.max(MIN_STREAMING_DECODE_CONTEXT_PATCHES)' in runtime, "caller prefix is clamped to decoder-safe floor")
 need('context.len()>decode_context_patches' in runtime, "rolling decode uses safe context")

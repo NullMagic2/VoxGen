@@ -4,8 +4,8 @@ main=(root/'src/main.rs').read_text(); http=(root/'src/http.rs').read_text(); de
 root_cargo=(root/'Cargo.toml').read_text(); demo_cargo=(root/'demo/Cargo.toml').read_text()
 def need(c,m):
     if not c: raise SystemExit('FAIL: '+m)
-need('version = "0.7.55"' in root_cargo,'root version')
-need('version = "0.7.55"' in demo_cargo,'demo version')
+need('version = "0.7.60"' in root_cargo,'root version')
+need('version = "0.7.60"' in demo_cargo,'demo version')
 need('#[arg(long, default_value_t = 1.0)]\n    gain: f32' in main,'--gain CLI')
 need('--gain must be a finite value >= 0.0' in main,'gain validation')
 need('OutputPeakGuard::process_all(result.sample_rate, &playback_samples, args.gain)' in main,'CLI gain protected after native DSP')

@@ -14,7 +14,7 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in cargo and 'version = "0.7.55"' in demo_cargo, 'v0.7.55 package versions')
+need('version = "0.7.60"' in cargo and 'version = "0.7.60"' in demo_cargo, 'v0.7.60 package versions')
 need('rust-version = "1.87"' in cargo, 'engine WSOLA MSRV')
 need('wsola = "0.1.0"' not in cargo, 'generic WSOLA dependency removed')
 need('wsola' not in demo_cargo.lower(), 'demo has no independent WSOLA dependency')
@@ -46,7 +46,7 @@ for token in ['speed_percent: Option<f32>', 'pitch_semitones: Option<f32>',
               'OutputPeakGuard::new(48_000)', 'peak_guard.process(&processed, gain)',
               'OutputPeakGuard::process_all(48_000, &rendered_samples, gain)']:
     need(token in http, f'missing HTTP native DSP token: {token}')
-need('use voxgen::{' in http and 'playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp, OUTPUT_PEAK_CEILING}' in http,
+need('use voxgen::playback_dsp::{' in http and 'OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp, OUTPUT_PEAK_CEILING' in http,
      'HTTP binary imports playback DSP from the library crate')
 need('crate::playback_dsp' not in http,
      'HTTP binary must not import playback DSP through crate::')
@@ -77,4 +77,4 @@ for speed_pct in (50, 75, 100, 125, 150, 200):
         need(0.25 <= tempo <= 4.0, 'WSOLA tempo in supported safety range')
 
 need('--speed-percent' not in main and '--pitch-semitones' not in main, 'legacy CLI flag strings are absent')
-print('v0.7.55 native playback DSP validation passed')
+print('v0.7.60 native playback DSP validation passed')

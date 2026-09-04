@@ -10,8 +10,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit(f'FAIL: {msg}')
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in demo_cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in demo_cargo, 'demo version')
 need('("normal", "Normal")' in main, 'compact Normal UI label')
 need('("xtx7900", "XTX 7900")' in main, 'compact XTX 7900 UI label')
 need('Normal (--mode normal)' not in main, 'old verbose Normal UI label removed')

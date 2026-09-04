@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 mod acoustic;
 mod audiovae;
 mod baselm;
@@ -6,6 +8,7 @@ mod gguf;
 mod http;
 mod local;
 mod profiler;
+mod prosody_control;
 mod runtime;
 mod tokenizer;
 mod vulkan;
@@ -20,6 +23,7 @@ use local::{CfmOptions, LocalConfig};
 use runtime::{Runtime, TtsOptions};
 use vulkan::{ExecutionMode, XtxTuning};
 use voxgen::playback_dsp::{OutputPeakGuard, PlaybackControls, StreamingPlaybackDsp};
+use crate::prosody_control::{apply_managed_cfg, build_style_control};
 use serde_json::json;
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::Instant};
 
@@ -313,6 +317,21 @@ struct Args {
     /// cloning, but intentionally incompatible with prompt/ultimate cloning.
     #[arg(long)]
     control: Option<String>,
+
+    /// VoxGen-managed destination style. This is destination-only; prior state
+    /// is never supplied by CLI clients. For persistent cross-phrase continuity,
+    /// use the HTTP API with continuity_id.
+    #[arg(long)]
+    style: Option<String>,
+
+    /// Destination intensity for --style: subtle, normal, or strong.
+    #[arg(long, default_value = "normal")]
+    intensity: String,
+
+    /// Managed speaking-rate target for --style, as percent of ordinary pace.
+    /// This is prosody conditioning, not WSOLA playback speed.
+    #[arg(long, default_value_t = 100.0)]
+    pace_percent: f32,
 
     /// Voice-cloning conditioning strategy.
     #[arg(long, value_enum, default_value = "auto")]
@@ -647,17 +666,48 @@ fn main() -> Result<()> {
                 if reference_wav.is_none(){reference_wav=Some(source);}
             }
         }
-        if args.control.as_deref().is_some_and(|x|!x.trim().is_empty()) && prompt_wav.is_some(){
-            bail!("--control cannot be combined with prompt/ultimate cloning");
+        if args.style.is_some() && args.control.as_deref().is_some_and(|x|!x.trim().is_empty()) {
+            bail!("--style cannot be combined with --control");
+        }
+        if !args.pace_percent.is_finite() || !(50.0..=200.0).contains(&args.pace_percent) {
+            bail!("--pace-percent must be finite and between 50 and 200");
+        }
+        if args.style.is_none() && (args.intensity != "normal" || (args.pace_percent - 100.0).abs() > 1.0e-4) {
+            bail!("--intensity/--pace-percent require --style");
+        }
+        if args.style.is_some() && (args.speed_percent - 100.0).abs() > 1.0e-4 {
+            bail!("--speed must remain 100 when --style/--pace-percent managed prosody is active; use --pace-percent instead");
+        }
+        let managed_control = if let Some(style) = args.style.as_deref() {
+            let raw = build_style_control(style, &args.intensity, "")
+                .ok_or_else(|| anyhow::anyhow!("unsupported --style/--intensity combination"))?;
+            let mut effective = prosody_control::refine_control_instruction(&raw, text);
+            if (args.pace_percent - 100.0).abs() >= 0.001 {
+                effective.push_str(&format!(
+                    " Maintain speaking pace around {:.0}% of ordinary conversational pace throughout; treat this as a speaking-rate target, not a pitch shift.",
+                    args.pace_percent
+                ));
+            }
+            Some((raw, effective))
+        } else { None };
+        let effective_control = managed_control.as_ref().map(|(_, effective)| effective.as_str()).or(args.control.as_deref());
+        if effective_control.is_some_and(|x|!x.trim().is_empty()) && prompt_wav.is_some(){
+            bail!("--control/--style cannot be combined with prompt/ultimate cloning");
+        }
+        let mut text_cfm_options = cfm_options.clone();
+        if args.cfm_cfg.is_none() {
+            if let Some((raw, _)) = managed_control.as_ref() {
+                text_cfm_options.cfg_value = apply_managed_cfg(cfm_default_cfg, Some(raw));
+            }
         }
         let mut reports=Vec::new();
         for variation in 0..args.variations {
-            let mut tts=TtsOptions{min_steps:args.min_steps,max_steps:args.max_steps,streaming_prefix_len:args.streaming_prefix_len,cfm:cfm_options.clone()};
+            let mut tts=TtsOptions{min_steps:args.min_steps,max_steps:args.max_steps,streaming_prefix_len:args.streaming_prefix_len,cfm:text_cfm_options.clone()};
             if variation>0 { tts.cfm.seed=tts.cfm.seed.wrapping_add((variation as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)); }
             let result=if stream_enabled {
-                runtime.synthesize(text,args.control.as_deref(),args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,Some(|_chunk:&[f32],_sr:u32|->Result<()>{Ok(())}))?
+                runtime.synthesize(text,effective_control,args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,Some(|_chunk:&[f32],_sr:u32|->Result<()>{Ok(())}))?
             } else {
-                runtime.synthesize::<fn(&[f32],u32)->Result<()>>(text,args.control.as_deref(),args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,None)?
+                runtime.synthesize::<fn(&[f32],u32)->Result<()>>(text,effective_control,args.prompt_text.as_deref(),reference_wav.as_deref(),prompt_wav.as_deref(),&tts,None)?
             };
             let playback_samples=StreamingPlaybackDsp::process_all(result.sample_rate, playback_controls, &result.samples)
                 .map_err(anyhow::Error::msg)?;
@@ -668,9 +718,14 @@ fn main() -> Result<()> {
             reports.push(json!({"variation":variation+1,"seed":tts.cfm.seed,"output_wav":output_path,"result":result}));
         }
         let gpu_profile=runtime.status().gpu_profile;
-        println!("{}",serde_json::to_string_pretty(&json!({"mode":"tts","streaming":stream_enabled,"gain":args.gain,"speed_percent":args.speed_percent,"pitch_semitones":args.pitch_semitones,"control":args.control,"clone_mode":format!("{:?}",args.clone_mode).to_ascii_lowercase(),"variations":reports,"gpu_profile":gpu_profile}))?);
+        let managed_style_json = args.style.as_ref().map(|style| json!({
+            "style": style,
+            "intensity": args.intensity,
+            "pace_percent": args.pace_percent,
+        }));
+        println!("{}",serde_json::to_string_pretty(&json!({"mode":"tts","streaming":stream_enabled,"gain":args.gain,"speed_percent":args.speed_percent,"pitch_semitones":args.pitch_semitones,"control":effective_control,"managed_style":managed_style_json,"clone_mode":format!("{:?}",args.clone_mode).to_ascii_lowercase(),"variations":reports,"gpu_profile":gpu_profile}))?);
         return Ok(());
-    } else if args.output_wav.is_some() || args.prompt_text.is_some() || args.control.is_some() { bail!("--output-wav/--prompt-text/--control require --text"); }
+    } else if args.output_wav.is_some() || args.prompt_text.is_some() || args.control.is_some() || args.style.is_some() || args.intensity != "normal" || (args.pace_percent - 100.0).abs() > 1.0e-4 { bail!("--output-wav/--prompt-text/--control/--style/--intensity/--pace-percent require --text"); }
 
     if args.cfm_mu_f32.is_some() || args.cfm_cond_f32.is_some() || args.cfm_bench {
         let m=args.cfm_mu_f32.as_ref().context("--cfm-mu-f32 and --cfm-cond-f32 must be provided together")?;

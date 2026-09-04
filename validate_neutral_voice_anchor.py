@@ -8,8 +8,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit(f"FAIL: {msg}")
 
-need('version = "0.7.55"' in root_cargo, 'root version 0.7.37')
-need('version = "0.7.55"' in demo_cargo, 'demo version 0.7.37')
+need('version = "0.7.60"' in root_cargo, 'root version 0.7.37')
+need('version = "0.7.60"' in demo_cargo, 'demo version 0.7.37')
 need('enum ReferenceSource' in demo and 'NeutralAnchor' in demo, 'neutral-anchor resolution type')
 need('fn resolve_reference_sample(' in demo, 'central reference resolver')
 need('cfg.emotion_references.get("neutral")' in demo, 'explicit neutral preset is consulted')

@@ -6,7 +6,7 @@ def need(x,msg):
     if not x: raise AssertionError(msg)
 
 cargo=(root/'Cargo.toml').read_text()
-need('version = "0.7.55"' in cargo,'Cargo version')
+need('version = "0.7.60"' in cargo,'Cargo version')
 need('base64 = "0.22"' in cargo,'HTTP base64 dependency')
 main=(root/'src/main.rs').read_text(); rt=(root/'src/runtime.rs').read_text(); ac=(root/'src/acoustic.rs').read_text(); gg=(root/'src/gguf.rs').read_text(); tok=(root/'src/tokenizer.rs').read_text(); http=(root/'src/http.rs').read_text()
 need('implementation_iteration: 7' in rt,'runtime iteration')

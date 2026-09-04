@@ -26,6 +26,9 @@ Controls:
 - **Select voice sample...** — choose a preset reference WAV; the Neutral preset is the canonical fallback voice anchor;
 - **Style / emotion** — Auto, Neutral, Warm, Cheerful, Excited, Sad, Concerned, Angry, Gentle, Serious, Whisper-like, or Custom;
 - **Intensity** — Subtle, Normal, or Strong. Intensity changes the natural-language model instruction rather than applying a fixed pitch/speed recipe;
+- **Transition to** — optionally evolve the current managed style into another managed style during the same synthesis request;
+- **End intensity** — destination intensity for the transition;
+- **Transition** — Gradual or Quick. Transitions are synthesized in one pass by VoxGen; the demo does not crossfade audio and uses the configured Neutral reference as the preferred transition anchor;
 - **Custom instruction** — free-form VoxCPM2 delivery instruction used by the Custom preset;
 - **Clone mode** — **Controllable reference** uses the style instruction with reference timbre; **Ultimate cloning** uses the reference/prompt audio plus its exact transcript and disables textual control;
 - **Reference transcript** — exact transcript required by Ultimate cloning;

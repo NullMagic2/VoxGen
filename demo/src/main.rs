@@ -1,8 +1,8 @@
+#![recursion_limit = "512"]
+
 use voxgen::{
     playback_dsp::{OutputPeakGuard, PlaybackControls as NativePlaybackControls, StreamingPlaybackDsp},
-    prosody_control::{
-        apply_managed_cfg, build_style_control, managed_style_tuning, refine_control_instruction,
-    },
+    prosody_control::{build_style_control, managed_style_tuning, refine_control_instruction},
 };
 use serde_json::json;
 use std::{
@@ -93,6 +93,11 @@ const INTENSITIES: [(&str, &str); 3] = [
     ("normal", "Normal"),
     ("strong", "Strong"),
 ];
+const CONTINUITY_BOUNDARIES: [(&str, &str); 2] = [
+    ("continuous", "Continuous"),
+    ("hard_cut", "Hard cut"),
+];
+const DEMO_CONTINUITY_ID: &str = "voxgen-demo";
 const CLONE_MODES: [(&str, &str); 2] = [
     ("reference", "Controllable reference"),
     ("ultimate", "Ultimate cloning"),
@@ -145,6 +150,8 @@ struct DemoSettings {
     engine_mode: String,
     style_preset: String,
     style_intensity: String,
+    managed_pace_percent: u32,
+    continuity_boundary: String,
     custom_control: String,
     clone_mode: String,
     prompt_text: String,
@@ -169,6 +176,8 @@ impl Default for DemoSettings {
             engine_mode: "normal".to_string(),
             style_preset: "auto".to_string(),
             style_intensity: "normal".to_string(),
+            managed_pace_percent: 100,
+            continuity_boundary: "continuous".to_string(),
             custom_control: String::new(),
             clone_mode: "reference".to_string(),
             prompt_text: String::new(),
@@ -220,6 +229,8 @@ impl DemoSettings {
                 "mode" => if ENGINE_MODES.iter().any(|(k, _)| *k == value) { out.engine_mode = value.to_string(); },
                 "style_preset" => if STYLE_PRESETS.iter().any(|(k, _)| *k == value) { out.style_preset = value.to_string(); },
                 "style_intensity" => if INTENSITIES.iter().any(|(k, _)| *k == value) { out.style_intensity = value.to_string(); },
+                "managed_pace_percent" => out.managed_pace_percent = value.parse::<u32>().map_err(|_| format!("invalid managed_pace_percent on line {}", line_no + 1))?.clamp(MIN_SPEED_PERCENT, MAX_SPEED_PERCENT),
+                "continuity_boundary" => if CONTINUITY_BOUNDARIES.iter().any(|(k, _)| *k == value) { out.continuity_boundary = value.to_string(); },
                 "custom_control" => out.custom_control = value.to_string(),
                 "clone_mode" => if CLONE_MODES.iter().any(|(k, _)| *k == value) { out.clone_mode = value.to_string(); },
                 "prompt_text" => out.prompt_text = value.to_string(),
@@ -253,7 +264,7 @@ impl DemoSettings {
         if !parent.is_dir() { return Err(format!("settings directory does not exist: {}", parent.display())); }
         let clean = |s: &str| s.replace('\r', " ").replace('\n', " ");
         let mut text = format!(
-            "# VoxGen Demo portable settings\n# This file intentionally lives beside voxgen-demo/voxgen-demo.exe.\nbase_model={}\nacoustic_model={}\nvoice_sample={}\nword_spacing_ms={}\nspeed_percent={}\npitch_semitones={}\ngain={:.2}\nstream={}\nmode={}\nstyle_preset={}\nstyle_intensity={}\ncustom_control={}\nclone_mode={}\nprompt_text={}\nvariations={}\ncfg={:.2}\ntemperature={:.2}\ninference_timesteps={}\n",
+            "# VoxGen Demo portable settings\n# This file intentionally lives beside voxgen-demo/voxgen-demo.exe.\nbase_model={}\nacoustic_model={}\nvoice_sample={}\nword_spacing_ms={}\nspeed_percent={}\npitch_semitones={}\ngain={:.2}\nstream={}\nmode={}\nstyle_preset={}\nstyle_intensity={}\nmanaged_pace_percent={}\ncontinuity_boundary={}\ncustom_control={}\nclone_mode={}\nprompt_text={}\nvariations={}\ncfg={:.2}\ntemperature={:.2}\ninference_timesteps={}\n",
             path_value(self.base_model.as_deref()),
             path_value(self.acoustic_model.as_deref()),
             path_value(self.voice_sample.as_deref()),
@@ -265,6 +276,8 @@ impl DemoSettings {
             self.engine_mode,
             self.style_preset,
             self.style_intensity,
+            self.managed_pace_percent.clamp(MIN_SPEED_PERCENT,MAX_SPEED_PERCENT),
+            self.continuity_boundary,
             clean(&self.custom_control),
             self.clone_mode,
             clean(&self.prompt_text),
@@ -457,9 +470,10 @@ impl RealtimeVoiceProcessor {
         }
     }
 
-    fn sync_controls(&mut self, controls: &LivePlaybackControls) {
+    fn sync_controls(&mut self, controls: &LivePlaybackControls, managed_continuity: bool) {
+        let speed_percent = if managed_continuity { 100.0 } else { controls.speed_percent() as f32 };
         let native = NativePlaybackControls::new(
-            controls.speed_percent() as f32,
+            speed_percent,
             controls.pitch_semitones() as f32,
         ).expect("demo sliders clamp to VoxGen native DSP limits");
         self.dsp
@@ -467,8 +481,8 @@ impl RealtimeVoiceProcessor {
             .expect("VoxGen native playback DSP control update must be valid");
     }
 
-    fn push(&mut self, input: &[f32], controls: &LivePlaybackControls) -> Vec<f32> {
-        self.sync_controls(controls);
+    fn push(&mut self, input: &[f32], controls: &LivePlaybackControls, managed_continuity: bool) -> Vec<f32> {
+        self.sync_controls(controls, managed_continuity);
         let rendered = self.dsp
             .push(input)
             .expect("VoxGen native playback DSP stream processing failed");
@@ -477,8 +491,8 @@ impl RealtimeVoiceProcessor {
             .expect("VoxGen output peak guard failed")
     }
 
-    fn finish(&mut self, controls: &LivePlaybackControls) -> Vec<f32> {
-        self.sync_controls(controls);
+    fn finish(&mut self, controls: &LivePlaybackControls, managed_continuity: bool) -> Vec<f32> {
+        self.sync_controls(controls, managed_continuity);
         let rendered = self.dsp
             .finish()
             .expect("VoxGen native playback DSP flush failed");
@@ -1415,10 +1429,16 @@ fn next_demo_seed() -> u64 {
 #[derive(Debug, Clone)]
 struct ExpressiveRequest {
     control: Option<String>,
+    style: Option<String>,
+    intensity: String,
+    pace_percent: f32,
+    continuity_id: Option<String>,
+    boundary: String,
     clone_mode: String,
     prompt_text: String,
     base_cfg_value: f32,
     cfg_value: f32,
+    cfg_override: Option<f32>,
     managed_gain_multiplier: f32,
     temperature: f32,
     inference_timesteps: u32,
@@ -1428,47 +1448,72 @@ impl ExpressiveRequest {
     fn effective_gain(&self, base_gain: f32) -> f32 {
         (base_gain * self.managed_gain_multiplier).clamp(0.0, MAX_GAIN_PERCENT as f32 / 100.0)
     }
+
+    fn managed_continuity(&self) -> bool {
+        self.continuity_id.is_some()
+    }
+}
+
+fn is_managed_style_preset(preset: &str) -> bool {
+    preset != "auto" && preset != "custom"
 }
 
 fn build_demo_expressive_request(
     text: &str,
     preset: &str,
     intensity: &str,
+    managed_pace_percent: u32,
+    continuity_boundary: &str,
     custom: &str,
     clone_mode: String,
     prompt_text: String,
     base_cfg_value: f32,
     temperature: f32,
     inference_timesteps: u32,
-) -> ExpressiveRequest {
+) -> Result<ExpressiveRequest, String> {
+    if !(MIN_SPEED_PERCENT..=MAX_SPEED_PERCENT).contains(&managed_pace_percent) {
+        return Err(format!("Managed pace must be between {MIN_SPEED_PERCENT}% and {MAX_SPEED_PERCENT}%"));
+    }
+    if !CONTINUITY_BOUNDARIES.iter().any(|(key, _)| *key == continuity_boundary) {
+        return Err("Continuity must be Continuous or Hard cut.".to_string());
+    }
+    let managed_style = clone_mode != "ultimate" && is_managed_style_preset(preset);
     let raw_control = if clone_mode == "ultimate" {
         None
     } else {
         build_style_control(preset, intensity, custom)
     };
+    if preset == "custom" && clone_mode != "ultimate" && custom.trim().is_empty() {
+        return Err("Custom style requires a delivery instruction.".to_string());
+    }
     let tuning = managed_style_tuning(raw_control.as_deref());
-    // Resolve the exact control text in the demo using the same engine-owned
-    // compiler used by Runtime. Sending the resolved form makes the log and the
-    // actual tokenized instruction identical; Runtime leaves the resolved custom
-    // text untouched because the managed legacy marker is no longer present.
-    let control = raw_control
-        .as_deref()
-        .map(|raw| refine_control_instruction(raw, text));
-    let cfg_value = if clone_mode == "ultimate" {
-        base_cfg_value
+    let control = if managed_style {
+        None
     } else {
-        apply_managed_cfg(base_cfg_value, raw_control.as_deref())
+        raw_control.as_deref().map(|raw| refine_control_instruction(raw, text))
     };
-    ExpressiveRequest {
+    let cfg_override = if (base_cfg_value - 2.0).abs() <= 0.0005 {
+        None
+    } else {
+        Some(base_cfg_value)
+    };
+
+    Ok(ExpressiveRequest {
         control,
+        style: managed_style.then(|| preset.to_string()),
+        intensity: intensity.to_string(),
+        pace_percent: managed_pace_percent as f32,
+        continuity_id: managed_style.then(|| DEMO_CONTINUITY_ID.to_string()),
+        boundary: continuity_boundary.to_string(),
         clone_mode,
         prompt_text,
         base_cfg_value,
-        cfg_value,
+        cfg_value: base_cfg_value,
+        cfg_override,
         managed_gain_multiplier: tuning.demo_gain_multiplier,
         temperature,
         inference_timesteps,
-    }
+    })
 }
 
 fn speech_request_json(
@@ -1484,18 +1529,23 @@ fn speech_request_json(
         "response_format": "wav",
         "seed": seed,
         "gain": effective_gain,
-        "cfg_value": expressive.cfg_value,
         "temperature": expressive.temperature,
         "inference_timesteps": expressive.inference_timesteps,
         "clone_mode": expressive.clone_mode,
     });
-    if let Some(control) = expressive.control.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
+    if let Some(cfg_value) = expressive.cfg_override {
+        request["cfg_value"] = json!(cfg_value);
+    }
+    if let Some(style) = expressive.style.as_deref() {
+        request["style"] = json!(style);
+        request["intensity"] = json!(expressive.intensity.as_str());
+        request["pace_percent"] = json!(expressive.pace_percent);
+        request["continuity_id"] = json!(expressive.continuity_id.as_deref().unwrap_or(DEMO_CONTINUITY_ID));
+        request["boundary"] = json!(expressive.boundary.as_str());
+    } else if let Some(control) = expressive.control.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
         request["control"] = json!(control);
     }
     if let Some(path) = voice_sample {
-        // The bundled demo always talks to localhost, so pass the stable local path.
-        // This avoids per-click WAV read + base64 + JSON expansion + temporary-file
-        // creation and lets the engine's AudioVAE conditioning cache actually hit.
         request["reference_audio_path"] = json!(path);
         if expressive.clone_mode == "ultimate" {
             let transcript = expressive.prompt_text.trim();
@@ -1570,6 +1620,7 @@ fn pcm16_wav_from_voxgen(
     wav: &[u8],
     word_spacing_ms: u32,
     live_controls: &LivePlaybackControls,
+    managed_continuity: bool,
 ) -> Result<Vec<u8>, String> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
         return Err("VoxGen response is not a RIFF/WAVE file".to_string());
@@ -1627,8 +1678,8 @@ fn pcm16_wav_from_voxgen(
     paced.extend(spacing.finish());
 
     let mut realtime = RealtimeVoiceProcessor::new();
-    let mut rendered = realtime.push(&paced, live_controls);
-    rendered.extend(realtime.finish(live_controls));
+    let mut rendered = realtime.push(&paced, live_controls, managed_continuity);
+    rendered.extend(realtime.finish(live_controls, managed_continuity));
     let samples = pcm16_samples_from_f32(&rendered, 0)?;
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for sample in samples {
@@ -1909,6 +1960,7 @@ fn speech_stream_windows(
     let mut player = WaveOutPlayer::new(cancel.clone())?;
     let mut spacing = WordSpacingProcessor::new(word_spacing_ms, 48_000);
     let mut realtime = RealtimeVoiceProcessor::new();
+    let managed_continuity = expressive.managed_continuity();
     let started = std::time::Instant::now();
     let mut generated_patches = 0usize;
     let mut header_left = 44usize;
@@ -1928,7 +1980,7 @@ fn speech_stream_windows(
     // playback consumes the queue sooner, so expose that tighter nominal
     // deadline in the benchmark block. Word-spacing can add some extra
     // playback time, therefore this remains a conservative diagnostic.
-    let initial_speed = live_controls.speed_percent().max(1) as f64;
+    let initial_speed = if managed_continuity { 100.0 } else { live_controls.speed_percent().max(1) as f64 };
     let patch_deadline_ms = 160.0 * 100.0 / initial_speed;
     if initial_speed > 100.0 {
         prebuffer_target = prebuffer_target.max(2);
@@ -2045,7 +2097,7 @@ fn speech_stream_windows(
         if cancel.is_cancelled() {
             return Err("speech synthesis cancelled".to_string());
         }
-        let rendered = realtime.push(&paced, live_controls);
+        let rendered = realtime.push(&paced, live_controls, managed_continuity);
         let arrived = std::time::Instant::now();
         if first_chunk_seconds.is_none() {
             first_chunk_seconds = Some(started.elapsed().as_secs_f64());
@@ -2088,13 +2140,13 @@ fn speech_stream_windows(
         return Err("speech synthesis cancelled".to_string());
     }
     let pacing_tail = spacing.finish();
-    let rendered_tail = realtime.push(&pacing_tail, live_controls);
+    let rendered_tail = realtime.push(&pacing_tail, live_controls, managed_continuity);
     if playback_started {
         player.queue_f32(&rendered_tail)?;
     } else {
         prebuffer_samples.extend_from_slice(&rendered_tail);
     }
-    let dsp_tail = realtime.finish(live_controls);
+    let dsp_tail = realtime.finish(live_controls, managed_continuity);
     if playback_started {
         player.queue_f32(&dsp_tail)?;
     } else {
@@ -2103,7 +2155,6 @@ fn speech_stream_windows(
             initial_buffer_patches = generated_patches;
             player.queue_f32(&prebuffer_samples)?;
             prebuffer_samples.clear();
-            playback_started = true;
             playback_start_seconds = Some(started.elapsed().as_secs_f64());
         }
     }
@@ -2666,26 +2717,30 @@ fn synthesize(
         expressive.inference_timesteps,
         variations,
     ));
-    if (expressive.cfg_value - expressive.base_cfg_value).abs() > 0.0005 {
-        append_log(log, &format!(
-            "Managed style guidance: base CFG {:.2} -> effective {:.2} ({:+.2}).",
-            expressive.base_cfg_value,
-            expressive.cfg_value,
-            expressive.cfg_value - expressive.base_cfg_value,
-        ));
+    if expressive.cfg_override.is_none() {
+        append_log(log, "CFG: default 2.0 is omitted from the request so VoxGen can apply endpoint-aware managed guidance.");
+    } else {
+        append_log(log, &format!("CFG: explicit user override {:.2}.", expressive.cfg_value));
     }
     if word_spacing_ms > 0 {
         append_log(log, &format!("Pacing: extending detected short word gaps by +{word_spacing_ms} ms."));
     }
     let base_gain = gain_percent as f32 / 100.0;
     let effective_gain = expressive.effective_gain(base_gain);
+    let managed_continuity = expressive.managed_continuity();
+    if managed_continuity {
+        append_log(log, &format!(
+            "Managed continuity: destination {} / {}, pace {:.0}%, boundary {}; playback speed DSP is locked at 100%.",
+            expressive.style.as_deref().unwrap_or("managed"), expressive.intensity, expressive.pace_percent, expressive.boundary
+        ));
+    }
     append_log(log, &format!(
         "Playback: stream {}, speed {}%, pitch {:+} semitones, gain {:.2}x{}.",
         if stream_enabled { "on" } else { "off" },
-        live_controls.speed_percent(),
+        if managed_continuity { 100 } else { live_controls.speed_percent() },
         live_controls.pitch_semitones(),
         effective_gain,
-        if stream_enabled { " (speed/pitch adjustable while streaming)" } else { "" },
+        if stream_enabled && !managed_continuity { " (speed/pitch adjustable while streaming)" } else if stream_enabled { " (pitch remains adjustable; speed is continuity-managed)" } else { "" },
     ));
     if (expressive.managed_gain_multiplier - 1.0).abs() > 0.0005 {
         append_log(log, &format!(
@@ -2756,7 +2811,9 @@ fn synthesize(
                 let request_started = std::time::Instant::now();
                 let speech = speech_wav(&text, sample.as_deref(), gain_percent as f32 / 100.0, seed, &expressive, Some(request_id))?;
                 let generation_seconds = request_started.elapsed().as_secs_f64();
-                rendered_wavs.push(pcm16_wav_from_voxgen(&speech.wav, word_spacing_ms, &live_controls)?);
+                rendered_wavs.push(pcm16_wav_from_voxgen(
+                    &speech.wav, word_spacing_ms, &live_controls, expressive.managed_continuity(),
+                )?);
                 summaries.push(VariationSummary {
                     index: i + 1,
                     seed,
@@ -2873,6 +2930,7 @@ fn main() {
         let model_buttons = BoxSizer::builder(Orientation::Horizontal).build();
         let diagnostics_row = BoxSizer::builder(Orientation::Horizontal).build();
         let expressive_controls_row = BoxSizer::builder(Orientation::Horizontal).build();
+        let continuity_controls_row = BoxSizer::builder(Orientation::Horizontal).build();
         let custom_controls_row = BoxSizer::builder(Orientation::Horizontal).build();
         let cloning_controls_row = BoxSizer::builder(Orientation::Horizontal).build();
         let generation_controls_row = BoxSizer::builder(Orientation::Horizontal).build();
@@ -2958,6 +3016,24 @@ fn main() {
         intensity_control.set_selection(table_index(&INTENSITIES, &initial_settings.style_intensity));
         intensity_control.set_min_size(Size::new(100, -1));
 
+        let managed_pace_label = StaticText::builder(&panel).with_label("Managed pace %:").build();
+        let managed_pace_control = SpinCtrl::builder(&panel)
+            .with_range(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32)
+            .build();
+        managed_pace_control.set_value(initial_settings.managed_pace_percent as i32);
+        managed_pace_control.set_min_size(Size::new(72, -1));
+        managed_pace_control.set_tooltip("Destination speaking pace. VoxGen suppresses changes below 5 points and advances changes above 45 points over later phrases.");
+
+        let continuity_label = StaticText::builder(&panel).with_label("Continuity:").build();
+        let continuity_labels = CONTINUITY_BOUNDARIES.iter().map(|(_, label)| *label).collect::<Vec<_>>();
+        let continuity_control = ComboBox::builder(&panel)
+            .with_string_choices(&continuity_labels)
+            .with_style(ComboBoxStyle::ReadOnly)
+            .build();
+        continuity_control.set_selection(table_index(&CONTINUITY_BOUNDARIES, &initial_settings.continuity_boundary));
+        continuity_control.set_min_size(Size::new(120, -1));
+        continuity_control.set_tooltip("Continuous lets VoxGen smoothly evolve style, intensity, and pace. Hard cut permits an immediate style change while intensity and pace remain protected from abrupt jumps.");
+
         let custom_control_label = StaticText::builder(&panel).with_label("Custom instruction:").build();
         let custom_control = TextCtrl::builder(&panel)
             .with_value(&initial_settings.custom_control)
@@ -2974,6 +3050,8 @@ fn main() {
         clone_mode_control.set_min_size(Size::new(170, -1));
         let ultimate_initial = initial_settings.clone_mode == "ultimate";
         intensity_control.enable(!ultimate_initial);
+        continuity_control.enable(!ultimate_initial);
+        managed_pace_control.enable(!ultimate_initial);
         custom_control.enable(!ultimate_initial);
         let prompt_text_label = StaticText::builder(&panel).with_label("Transcript of reference audio:").build();
         let prompt_text_control = TextCtrl::builder(&panel)
@@ -3085,6 +3163,13 @@ fn main() {
         expressive_controls_row.add(&intensity_control, 0, SizerFlag::Right, 12);
         expressive_controls_row.add_stretch_spacer(1);
         root.add_sizer(&expressive_controls_row, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
+
+        continuity_controls_row.add(&managed_pace_label, 0, SizerFlag::Right | SizerFlag::AlignCenterVertical, 6);
+        continuity_controls_row.add(&managed_pace_control, 0, SizerFlag::Right, 12);
+        continuity_controls_row.add(&continuity_label, 0, SizerFlag::Right | SizerFlag::AlignCenterVertical, 6);
+        continuity_controls_row.add(&continuity_control, 0, SizerFlag::Right, 12);
+        continuity_controls_row.add_stretch_spacer(1);
+        root.add_sizer(&continuity_controls_row, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom, 10);
 
         custom_controls_row.add(&custom_control_label, 0, SizerFlag::Right | SizerFlag::AlignCenterVertical, 6);
         custom_controls_row.add(&custom_control, 1, SizerFlag::Expand, 0);
@@ -3441,15 +3526,45 @@ fn main() {
         {
             let settings = Arc::clone(&settings_for_app);
             let output = output;
+            let continuity_control_copy = continuity_control;
+            continuity_control.on_selection_changed(move |_| {
+                let boundary = table_key(&CONTINUITY_BOUNDARIES, continuity_control_copy.get_selection());
+                if let Ok(mut cfg) = settings.lock() { cfg.continuity_boundary = boundary.to_string(); }
+                if let Err(err) = save_shared_settings(&settings) {
+                    append_log(output, &format!("Settings save warning: {err}"));
+                }
+            });
+        }
+
+        {
+            let settings = Arc::clone(&settings_for_app);
+            let output = output;
+            let control = managed_pace_control;
+            managed_pace_control.on_value_changed(move |_| {
+                if let Ok(mut cfg) = settings.lock() {
+                    cfg.managed_pace_percent = control.value().clamp(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32) as u32;
+                }
+                if let Err(err) = save_shared_settings(&settings) {
+                    append_log(output, &format!("Settings save warning: {err}"));
+                }
+            });
+        }
+
+        {
+            let settings = Arc::clone(&settings_for_app);
+            let output = output;
             let clone_mode_control_copy = clone_mode_control;
-            let style_control_copy = style_control;
             let intensity_control_copy = intensity_control;
+            let continuity_control_copy = continuity_control;
+            let managed_pace_control_copy = managed_pace_control;
             let custom_control_copy = custom_control;
             let prompt_text_control_copy = prompt_text_control;
             clone_mode_control.on_selection_changed(move |_| {
                 let mode = table_key(&CLONE_MODES, clone_mode_control_copy.get_selection());
                 let ultimate = mode == "ultimate";
                 intensity_control_copy.enable(!ultimate);
+                continuity_control_copy.enable(!ultimate);
+                managed_pace_control_copy.enable(!ultimate);
                 custom_control_copy.enable(!ultimate);
                 prompt_text_control_copy.enable(ultimate);
                 if let Ok(mut cfg) = settings.lock() { cfg.clone_mode = mode.to_string(); }
@@ -3457,7 +3572,7 @@ fn main() {
                     append_log(output, &format!("Settings save warning: {err}"));
                 }
                 if ultimate {
-                    append_log(output, "Ultimate cloning uses the selected preset only as an emotional reference profile; intensity/custom textual control is disabled and delivery comes from the reference audio + exact transcript.");
+                    append_log(output, "Ultimate cloning inherits delivery from the reference audio + exact transcript; managed style/intensity/pace continuity controls are disabled.");
                 }
             });
         }
@@ -3593,6 +3708,8 @@ fn main() {
             let mode_control_copy = engine_mode_control;
             let style_control_copy = style_control;
             let intensity_control_copy = intensity_control;
+            let continuity_control_copy = continuity_control;
+            let managed_pace_control_copy = managed_pace_control;
             let custom_control_copy = custom_control;
             let clone_mode_control_copy = clone_mode_control;
             let prompt_text_control_copy = prompt_text_control;
@@ -3616,6 +3733,8 @@ fn main() {
                 };
                 let preset = table_key(&STYLE_PRESETS, style_control_copy.get_selection()).to_string();
                 let intensity = table_key(&INTENSITIES, intensity_control_copy.get_selection()).to_string();
+                let continuity_boundary = table_key(&CONTINUITY_BOUNDARIES, continuity_control_copy.get_selection()).to_string();
+                let managed_pace_percent = managed_pace_control_copy.value().clamp(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32) as u32;
                 let clone_mode = table_key(&CLONE_MODES, clone_mode_control_copy.get_selection()).to_string();
                 let custom = custom_control_copy.get_value();
                 let prompt_text = prompt_text_control_copy.get_value();
@@ -3630,20 +3749,24 @@ fn main() {
                 let base_cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
                 let temperature = temperature_control_copy.value().clamp(50, 150) as f32 / 100.0;
                 let inference_timesteps = timesteps_control_copy.value().clamp(4, 30) as u32;
-                let mut expressive = build_demo_expressive_request(
-                    &text, &preset, &intensity, &custom, clone_mode, prompt_text,
-                    base_cfg_value, temperature, inference_timesteps,
-                );
+                let mut expressive = match build_demo_expressive_request(
+                    &text, &preset, &intensity, managed_pace_percent, &continuity_boundary,
+                    &custom, clone_mode.clone(), prompt_text.clone(), base_cfg_value, temperature, inference_timesteps,
+                ) {
+                    Ok(v) => v,
+                    Err(err) => { append_log(output, &format!("A/B benchmark: {err}")); return; }
+                };
                 let runtime_voice_sample = state.lock().ok().and_then(|guard| guard.voice_sample.clone());
                 let (stream_enabled, settings_snapshot) = match settings.lock() {
                     Ok(cfg) => (cfg.stream, cfg.clone()),
                     Err(_) => { append_log(output, "A/B benchmark: settings lock failed; refusing unanchored generation."); return; }
                 };
-                let resolved_reference = match resolve_reference_sample(&settings_snapshot, &preset, runtime_voice_sample) {
+                let reference_preset = if clone_mode != "ultimate" && is_managed_style_preset(&preset) { "neutral" } else { preset.as_str() };
+                let resolved_reference = match resolve_reference_sample(&settings_snapshot, reference_preset, runtime_voice_sample) {
                     Ok(value) => value,
                     Err(err) => { append_log(output, &format!("A/B benchmark: {err}")); return; }
                 };
-                if let Some(message) = resolved_reference.describe(&preset) { append_log(output, &message); }
+                if let Some(message) = resolved_reference.describe(reference_preset) { append_log(output, &message); }
                 let sample = resolved_reference.path;
                 expressive = match effective_expressive_for_sample(expressive, sample.as_deref()) {
                     Ok(v) => v,
@@ -3731,6 +3854,8 @@ fn main() {
             let mode_control_copy = engine_mode_control;
             let style_control_copy = style_control;
             let intensity_control_copy = intensity_control;
+            let continuity_control_copy = continuity_control;
+            let managed_pace_control_copy = managed_pace_control;
             let custom_control_copy = custom_control;
             let clone_mode_control_copy = clone_mode_control;
             let prompt_text_control_copy = prompt_text_control;
@@ -3751,6 +3876,8 @@ fn main() {
                 };
                 let preset = table_key(&STYLE_PRESETS, style_control_copy.get_selection()).to_string();
                 let intensity = table_key(&INTENSITIES, intensity_control_copy.get_selection()).to_string();
+                let continuity_boundary = table_key(&CONTINUITY_BOUNDARIES, continuity_control_copy.get_selection()).to_string();
+                let managed_pace_percent = managed_pace_control_copy.value().clamp(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32) as u32;
                 let clone_mode = table_key(&CLONE_MODES, clone_mode_control_copy.get_selection()).to_string();
                 let custom = custom_control_copy.get_value();
                 let prompt_text = prompt_text_control_copy.get_value();
@@ -3765,20 +3892,24 @@ fn main() {
                 let base_cfg_value = cfg_control_copy.value().clamp(100, 300) as f32 / 100.0;
                 let temperature = temperature_control_copy.value().clamp(50, 150) as f32 / 100.0;
                 let inference_timesteps = timesteps_control_copy.value().clamp(4, 30) as u32;
-                let mut expressive = build_demo_expressive_request(
-                    &text, &preset, &intensity, &custom, clone_mode, prompt_text,
-                    base_cfg_value, temperature, inference_timesteps,
-                );
+                let mut expressive = match build_demo_expressive_request(
+                    &text, &preset, &intensity, managed_pace_percent, &continuity_boundary,
+                    &custom, clone_mode.clone(), prompt_text.clone(), base_cfg_value, temperature, inference_timesteps,
+                ) {
+                    Ok(v) => v,
+                    Err(err) => { append_log(output, &format!("XTX profile: {err}")); return; }
+                };
                 let runtime_voice_sample = state.lock().ok().and_then(|guard| guard.voice_sample.clone());
                 let (stream_enabled, settings_snapshot) = match settings.lock() {
                     Ok(cfg) => (cfg.stream, cfg.clone()),
                     Err(_) => { append_log(output, "XTX profile: settings lock failed; refusing unanchored generation."); return; }
                 };
-                let resolved_reference = match resolve_reference_sample(&settings_snapshot, &preset, runtime_voice_sample) {
+                let reference_preset = if clone_mode != "ultimate" && is_managed_style_preset(&preset) { "neutral" } else { preset.as_str() };
+                let resolved_reference = match resolve_reference_sample(&settings_snapshot, reference_preset, runtime_voice_sample) {
                     Ok(value) => value,
                     Err(err) => { append_log(output, &format!("XTX profile: {err}")); return; }
                 };
-                if let Some(message) = resolved_reference.describe(&preset) { append_log(output, &message); }
+                if let Some(message) = resolved_reference.describe(reference_preset) { append_log(output, &message); }
                 let sample = resolved_reference.path;
                 expressive = match effective_expressive_for_sample(expressive, sample.as_deref()) {
                     Ok(v) => v,
@@ -3929,6 +4060,8 @@ fn main() {
             let gain_control_copy = gain_control;
             let style_control_copy = style_control;
             let intensity_control_copy = intensity_control;
+            let continuity_control_copy = continuity_control;
+            let managed_pace_control_copy = managed_pace_control;
             let custom_control_copy = custom_control;
             let clone_mode_control_copy = clone_mode_control;
             let prompt_text_control_copy = prompt_text_control;
@@ -3951,6 +4084,8 @@ fn main() {
                 }
                 let preset = table_key(&STYLE_PRESETS, style_control_copy.get_selection()).to_string();
                 let intensity = table_key(&INTENSITIES, intensity_control_copy.get_selection()).to_string();
+                let continuity_boundary = table_key(&CONTINUITY_BOUNDARIES, continuity_control_copy.get_selection()).to_string();
+                let managed_pace_percent = managed_pace_control_copy.value().clamp(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32) as u32;
                 let clone_mode = table_key(&CLONE_MODES, clone_mode_control_copy.get_selection()).to_string();
                 let custom = custom_control_copy.get_value();
                 let prompt_text = prompt_text_control_copy.get_value();
@@ -3976,6 +4111,8 @@ fn main() {
                     Ok(mut cfg) => {
                         cfg.style_preset = preset.clone();
                         cfg.style_intensity = intensity.clone();
+                        cfg.continuity_boundary = continuity_boundary.clone();
+                        cfg.managed_pace_percent = managed_pace_percent;
                         cfg.custom_control = custom.clone();
                         cfg.clone_mode = clone_mode.clone();
                         cfg.prompt_text = prompt_text.clone();
@@ -3996,23 +4133,36 @@ fn main() {
                 if let Err(err) = save_shared_settings(&settings) {
                     append_log(output, &format!("Settings save warning: {err}"));
                 }
-                let resolved_reference = match resolve_reference_sample(&settings_snapshot, &preset, runtime_voice_sample) {
+                let reference_preset = if clone_mode != "ultimate" && is_managed_style_preset(&preset) { "neutral" } else { preset.as_str() };
+                let resolved_reference = match resolve_reference_sample(&settings_snapshot, reference_preset, runtime_voice_sample) {
                     Ok(value) => value,
                     Err(err) => { append_log(output, &err); return; }
                 };
-                if let Some(message) = resolved_reference.describe(&preset) { append_log(output, &message); }
+                if clone_mode != "ultimate" && is_managed_style_preset(&preset) {
+                    append_log(output, &format!(
+                        "Managed continuity: destination {} / {}, pace {}%, boundary {}; using stable neutral speaker anchor.",
+                        preset, intensity, managed_pace_percent, continuity_boundary
+                    ));
+                    speak_live_playback_controls.set_speed_percent(100);
+                }
+                if let Some(message) = resolved_reference.describe(reference_preset) { append_log(output, &message); }
                 let sample_override = resolved_reference.path;
-                let expressive = build_demo_expressive_request(
+                let expressive = match build_demo_expressive_request(
                     &text,
                     &preset,
                     &intensity,
+                    managed_pace_percent,
+                    &continuity_boundary,
                     &custom,
-                    clone_mode,
-                    prompt_text,
+                    clone_mode.clone(),
+                    prompt_text.clone(),
                     cfg_percent as f32 / 100.0,
                     temperature_percent as f32 / 100.0,
                     inference_timesteps,
-                );
+                ) {
+                    Ok(value) => value,
+                    Err(err) => { append_log(output, &format!("Style/continuity error: {err}")); return; }
+                };
                 synthesize(
                     text,
                     Arc::clone(&state),
@@ -4049,6 +4199,8 @@ fn main() {
             let gain_control_copy = gain_control;
             let style_control_copy = style_control;
             let intensity_control_copy = intensity_control;
+            let continuity_control_copy = continuity_control;
+            let managed_pace_control_copy = managed_pace_control;
             let custom_control_copy = custom_control;
             let clone_mode_control_copy = clone_mode_control;
             let prompt_text_control_copy = prompt_text_control;
@@ -4070,6 +4222,8 @@ fn main() {
                         cfg.gain_percent = gain_control_copy.value().clamp(MIN_GAIN_PERCENT as i32, MAX_GAIN_PERCENT as i32) as u32;
                         cfg.style_preset = table_key(&STYLE_PRESETS, style_control_copy.get_selection()).to_string();
                         cfg.style_intensity = table_key(&INTENSITIES, intensity_control_copy.get_selection()).to_string();
+                        cfg.continuity_boundary = table_key(&CONTINUITY_BOUNDARIES, continuity_control_copy.get_selection()).to_string();
+                        cfg.managed_pace_percent = managed_pace_control_copy.value().clamp(MIN_SPEED_PERCENT as i32, MAX_SPEED_PERCENT as i32) as u32;
                         cfg.custom_control = custom_control_copy.get_value();
                         cfg.clone_mode = table_key(&CLONE_MODES, clone_mode_control_copy.get_selection()).to_string();
                         cfg.prompt_text = prompt_text_control_copy.get_value();

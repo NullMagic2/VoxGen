@@ -34,7 +34,7 @@ need('cfg_delta: 0.0, demo_gain_multiplier: 0.90' in prosody,
      'angry managed tuning avoids CFG escalation and trims demo level')
 
 # Health metadata documents the new behavior.
-need('"version": 8' in http, 'managed prosody v8 health metadata')
+need('"version": 10' in http, 'managed prosody v10 health metadata')
 need('controlled-cold-anger-tension-timing-not-loudness' in http, 'angry health semantics')
 need('low-effort-near-whisper-airflow-reduced-periodic-voicing' in http, 'whisper health semantics')
 need('"whisper_delta": 0.10' in http and '"angry_delta": 0.0' in http,

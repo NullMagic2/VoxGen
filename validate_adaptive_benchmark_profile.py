@@ -11,8 +11,8 @@ demo_cargo=(root/'demo/Cargo.toml').read_text()
 def need(cond,msg):
     if not cond: raise SystemExit(f'FAIL: {msg}')
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in demo_cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in demo_cargo, 'demo version')
 # Adaptive buffering
 need('STREAM_PREBUFFER_MIN_PATCHES: usize = 1' in demo, 'one-patch low-latency minimum buffer')
 need('if initial_speed > 100.0' in demo and 'prebuffer_target = prebuffer_target.max(2)' in demo, 'faster-speed reserve')

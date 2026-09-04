@@ -12,8 +12,8 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in cargo, 'demo version')
 need('rust-version = "1.87"' in cargo, 'WSOLA dependency MSRV')
 need('wsola = "0.1.0"' not in engine_cargo, 'generic WSOLA dependency removed')
 need('wsola = "0.1.0"' not in cargo, 'demo no longer owns WSOLA dependency')
@@ -35,8 +35,8 @@ for token in [
     'pitch_control.on_value_changed',
     'controls.set_speed_percent',
     'controls.set_pitch_semitones',
-    'realtime.push(&paced, live_controls)',
-    'realtime.finish(live_controls)',
+    'realtime.push(&paced, live_controls, managed_continuity)',
+    'realtime.finish(live_controls, managed_continuity)',
     'adjustable while streaming',
 ]:
     need(token in src, f'missing demo control token {token}')
@@ -68,7 +68,7 @@ for speed_pct in (50, 75, 100, 105, 125, 150, 200):
              f'WSOLA tempo outside supported range {speed_pct}% {semitones:+d} st')
 
 idx_spacing = src.index('let paced = spacing.push(&floats);', src.index('fn speech_stream_windows'))
-idx_dsp = src.index('realtime.push(&paced, live_controls)', idx_spacing)
+idx_dsp = src.index('realtime.push(&paced, live_controls, managed_continuity)', idx_spacing)
 idx_queue = src.index('player.queue_f32(&rendered)?', idx_dsp)
 need(idx_spacing < idx_dsp < idx_queue, 'streaming DSP order')
 

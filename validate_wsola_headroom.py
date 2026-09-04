@@ -13,8 +13,8 @@ def need(cond, msg):
     if not cond:
         raise SystemExit('FAIL: ' + msg)
 
-need('version = "0.7.55"' in cargo and 'version = "0.7.55"' in demo_cargo,
-     'v0.7.55 package versions')
+need('version = "0.7.60"' in cargo and 'version = "0.7.60"' in demo_cargo,
+     'v0.7.60 package versions')
 need('0.5 - 0.5 * (std::f32::consts::PI * t).cos()' in src,
      'raised-cosine WSOLA fade-in')
 need('fade_out.push(1.0 - fade_in_value)' in src,
@@ -53,4 +53,4 @@ need(peak <= 0.9500000001, 'correlated overlap does not amplify')
 # Demonstrate the exact regression we are preventing.
 equal_power_mid = math.cos(math.pi / 4) + math.sin(math.pi / 4)
 need(equal_power_mid > 1.4141, 'old equal-power midpoint would amplify correlated speech')
-print('v0.7.55 WSOLA headroom regression validation passed')
+print('v0.7.60 WSOLA headroom regression validation passed')

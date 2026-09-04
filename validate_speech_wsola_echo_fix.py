@@ -10,7 +10,7 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in cargo, 'v0.7.55 root version')
+need('version = "0.7.60"' in cargo, 'v0.7.60 root version')
 need('wsola = ' not in cargo, 'external generic WSOLA dependency removed')
 need('struct SpeechWsola' in src, 'engine-owned SpeechWsola')
 need('sample_rate as f64 * 0.030' in src, '30 ms speech window')
@@ -39,4 +39,4 @@ ncc_bad = raw_bad/(norm(reference)*norm(bad))
 need(raw_bad > raw_good, 'fixture must expose raw-energy bias')
 need(ncc_good > ncc_bad and ncc_good > 0.999, 'NCC must prefer waveform match over loudness')
 
-print('v0.7.55 speech WSOLA echo regression validation passed')
+print('v0.7.60 speech WSOLA echo regression validation passed')

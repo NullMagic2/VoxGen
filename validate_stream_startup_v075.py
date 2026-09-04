@@ -9,7 +9,7 @@ demo_cargo=(root/'demo/Cargo.toml').read_text()
 errors=[]
 def need(ok,msg):
     if not ok: errors.append(msg)
-need('version = "0.7.55"' in root_cargo and 'version = "0.7.55"' in demo_cargo,'root/demo version 0.7.37')
+need('version = "0.7.60"' in root_cargo and 'version = "0.7.60"' in demo_cargo,'root/demo version 0.7.37')
 need('conditioning_audio_cache' in rt and 'audiovae_encode_wav_patches_cached' in rt,'AudioVAE conditioning cache')
 need('warm_reference_wav' in rt and '/v1/audio/conditioning/warm' in http,'conditioning warm endpoint')
 need('reference_audio_path' in demo and 'prompt_audio_path' in demo,'demo stable reference/prompt path')

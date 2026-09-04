@@ -449,6 +449,361 @@ fn angry_profile(intensity: ManagedIntensity, text: &str) -> String {
     format!("{base}{}", short_angry_guard(text))
 }
 
+
+pub(crate) const MIN_MOOD_SPEED_PERCENT: f32 = 50.0;
+pub(crate) const MAX_MOOD_SPEED_PERCENT: f32 = 200.0;
+pub(crate) const MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT: f32 = 5.0;
+pub(crate) const MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT: f32 = 45.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MoodSpeedTransition {
+    pub(crate) from_percent: f32,
+    pub(crate) to_percent: f32,
+}
+
+impl MoodSpeedTransition {
+    pub(crate) fn new(from_percent: f32, to_percent: f32) -> Result<Self, String> {
+        for (label, value) in [("from", from_percent), ("to", to_percent)] {
+            if !value.is_finite() || !(MIN_MOOD_SPEED_PERCENT..=MAX_MOOD_SPEED_PERCENT).contains(&value) {
+                return Err(format!(
+                    "transition {label}_speed_percent must be finite and between {MIN_MOOD_SPEED_PERCENT:.0} and {MAX_MOOD_SPEED_PERCENT:.0}"
+                ));
+            }
+        }
+        let delta = (to_percent - from_percent).abs();
+        if delta > 0.0 && delta < MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT {
+            return Err(format!(
+                "speed transition is too subtle ({delta:.1} percentage points); omit it or use at least {MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT:.0} percentage points"
+            ));
+        }
+        if delta > MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT {
+            return Err(format!(
+                "speed transition is too large for one natural phrase ({delta:.1} percentage points); keep it within {MAX_NATURAL_MOOD_SPEED_DELTA_PERCENT:.0} percentage points or split the change across phrases"
+            ));
+        }
+        Ok(Self { from_percent, to_percent })
+    }
+
+    pub(crate) fn changed(self) -> bool {
+        (self.to_percent - self.from_percent).abs() >= MIN_MEANINGFUL_MOOD_SPEED_DELTA_PERCENT
+    }
+}
+
+pub(crate) fn parse_mood_speed_transition(
+    from_percent: Option<f32>,
+    to_percent: Option<f32>,
+) -> Result<Option<MoodSpeedTransition>, String> {
+    match (from_percent, to_percent) {
+        (None, None) => Ok(None),
+        (Some(from), Some(to)) => {
+            let speed = MoodSpeedTransition::new(from, to)?;
+            if speed.changed() { Ok(Some(speed)) } else { Ok(None) }
+        }
+        _ => Err("from_speed_percent and to_speed_percent must be supplied together".to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoodTransitionMode {
+    Gradual,
+    Quick,
+}
+
+impl MoodTransitionMode {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "gradual" | "smooth" => Ok(Self::Gradual),
+            "quick" | "fast" => Ok(Self::Quick),
+            other => Err(format!("unsupported transition mode '{other}'; use gradual or quick")),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Gradual => "gradual",
+            Self::Quick => "quick",
+        }
+    }
+}
+
+fn normalize_transition_intensity(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "subtle" => Ok("subtle"),
+        "normal" | "medium" => Ok("normal"),
+        "strong" => Ok("strong"),
+        other => Err(format!("unsupported transition intensity '{other}'; use subtle, normal, or strong")),
+    }
+}
+
+fn normalize_transition_style(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "neutral" => Ok("neutral"),
+        "warm" => Ok("warm"),
+        "cheerful" => Ok("cheerful"),
+        "excited" => Ok("excited"),
+        "sad" => Ok("sad"),
+        "concerned" => Ok("concerned"),
+        "angry" => Ok("angry"),
+        "gentle" => Ok("gentle"),
+        "serious" => Ok("serious"),
+        "whisper" | "whisper-like" | "whisper_like" => Ok("whisper"),
+        other => Err(format!(
+            "unsupported transition style '{other}'; use neutral, warm, cheerful, excited, sad, concerned, angry, gentle, serious, or whisper"
+        )),
+    }
+}
+
+fn transition_intensity_word(intensity: &str) -> &'static str {
+    match intensity {
+        "subtle" => "lightly",
+        "strong" => "strongly",
+        _ => "clearly",
+    }
+}
+
+fn transition_signature(style: &str, intensity: &str) -> String {
+    let degree = transition_intensity_word(intensity);
+    match style {
+        "neutral" => format!("{degree} affect-neutral, with natural conversational pitch, timing, lexical stress, and ordinary sentence intonation"),
+        "warm" => format!("{degree} warm and affiliative, with low vocal effort, smooth connected phrasing, soft attacks, mellow resonance, and a faint friendly smile"),
+        "cheerful" => format!("{degree} cheerful, with a light audible smile, brighter resonance, buoyant rhythm, and wider but smooth positive pitch movement"),
+        "excited" => format!("{degree} excited and positively engaged, with quicker timing, wider dynamic pitch movement, crisp articulation, and brief local energy peaks that release"),
+        "sad" => format!("{degree} sad and reflective, with a lower pitch centre, narrower pitch range, softer energy, slower phrasing, and gently falling endings"),
+        "concerned" => format!("{degree} concerned and attentive, with mild local tension and responsive pitch that can soften into slower, lower, reassuring contours"),
+        "angry" => format!("{degree} controlled cold anger, with firm vocal tension, hard clean attacks, compact purposeful pitch movement, quicker timing, and moderate sustained loudness"),
+        "gentle" => format!("{degree} gentle and low-effort, with reduced projection, smooth phrasing, light attacks, relaxed articulation, and restrained but living pitch movement"),
+        "serious" => format!("{degree} serious and deliberate, with controlled pitch movement, measured pacing, stable intensity, firm articulation, selective emphasis, and resolved endings"),
+        "whisper" => format!("{degree} near-whispered, with very low vocal effort, audible airflow, minimal projection, softened attacks, and reduced periodic voicing while remaining intelligible"),
+        _ => unreachable!(),
+    }
+}
+
+fn transition_pair_motion(from: &str, to: &str) -> Option<&'static str> {
+    match (from, to) {
+        ("angry", "serious") => Some(
+            "Retain firmness at first, then progressively release vocal tension, soften the hard attacks, lengthen pauses slightly, stabilize pitch and intensity, and finish composed and consequential rather than angry."
+        ),
+        ("concerned", "warm") => Some(
+            "Begin attentive and mildly tense; then let the pitch settle toward the speaker's natural centre, slow slightly, soften attacks, smooth the phrasing, and let caring warmth emerge as the concern resolves."
+        ),
+        ("sad", "warm") => Some(
+            "Keep the subdued pace and narrower pitch early, then gradually restore pitch variability and vocal energy, soften the heaviness of falling contours, and let gentle affiliative warmth appear without suddenly becoming cheerful."
+        ),
+        ("excited", "neutral") => Some(
+            "Start animated, then steadily narrow the pitch excursions, release the quicker rhythm and local energy peaks, lengthen pauses toward normal, and settle into ordinary conversational prosody without sounding deflated."
+        ),
+        ("warm", "serious") => Some(
+            "Begin approachable and smooth, then reduce the smile and affiliative softness, make articulation firmer, stabilize intensity, restrain pitch excursions, and finish focused and consequential without becoming cold or angry."
+        ),
+        ("serious", "warm") => Some(
+            "Begin focused and composed, then gradually release firmness and pitch restraint, soften attacks, smooth the phrasing, and introduce mellow affiliative warmth while preserving clarity and speaker identity."
+        ),
+        ("neutral", "concerned") => Some(
+            "Begin in ordinary conversational prosody, then introduce mild local tension, more attentive pitch responses, and focused articulation without turning the phrase into fear or panic."
+        ),
+        ("concerned", "neutral") => Some(
+            "Begin attentive and mildly tense, then release the concern cues: settle pitch, normalize timing, soften local tension, and finish in ordinary conversational prosody rather than reassurance acting."
+        ),
+        ("neutral", "sad") => Some(
+            "Begin naturally neutral, then lower and narrow the pitch gradually, soften the energy, slow the phrasing, and allow more reflective falling endings without becoming sleepy or monotone."
+        ),
+        ("sad", "neutral") => Some(
+            "Begin subdued, then gradually restore the speaker's ordinary pitch range, conversational timing, energy, and lexical prominence without jumping into cheerfulness."
+        ),
+        ("neutral", "warm") => Some(
+            "Begin naturally neutral, then soften attacks and timing, reduce vocal effort slightly, smooth the phrasing, and let a faint affiliative smile and mellow warmth emerge progressively."
+        ),
+        ("warm", "neutral") => Some(
+            "Begin warm and affiliative, then gradually remove the smile and interpersonal softness while preserving natural conversational movement, ending emotionally unmarked rather than cold."
+        ),
+        ("neutral", "serious") => Some(
+            "Begin in ordinary conversational prosody, then progressively tighten focus: make pauses more deliberate, articulation firmer, pitch excursions more controlled, and phrase endings more resolved while keeping the speaker's natural pitch centre and normal loudness."
+        ),
+        ("serious", "neutral") => Some(
+            "Begin deliberate and focused, then release the controlled stance: relax articulation and pause placement, restore ordinary pitch movement and conversational timing, and finish naturally unmarked without sounding casual or dismissive."
+        ),
+        ("cheerful", "excited") => Some(
+            "Begin lightly positive and buoyant, then raise arousal rather than simply volume: widen and quicken pitch movement, shorten transitions slightly, sharpen articulation, and introduce brief local energy peaks that still release between accents."
+        ),
+        ("excited", "cheerful") => Some(
+            "Begin highly animated, then lower arousal while keeping positive valence: narrow the largest pitch excursions, relax the quick timing and energy peaks, and settle into a lighter smile and buoyant conversational rhythm rather than dropping to neutral."
+        ),
+        ("concerned", "serious") => Some(
+            "Begin attentive with mild vocal tension, then convert that urgency into composed focus: settle responsive pitch, remove worry-like tension, make pauses deliberate and articulation firm, and finish consequential rather than anxious."
+        ),
+        ("serious", "concerned") => Some(
+            "Begin composed and deliberate, then introduce attentive concern without panic: add mild local tension and responsive pitch around important words while preserving controlled loudness and clear reasoning."
+        ),
+        ("warm", "gentle") => Some(
+            "Begin affiliative and warmly connected, then reduce the interpersonal smile while lowering vocal effort and projection, keeping smooth phrasing and soft attacks so the ending is gentle rather than merely less warm."
+        ),
+        ("gentle", "warm") => Some(
+            "Begin low-effort and unprojected, then keep the softness while introducing affiliative cues: a faint smile, mellow resonance, slightly more connected phrasing, and a sense of personal warmth without increasing loudness."
+        ),
+        ("warm", "sad") => Some(
+            "Begin warm and connected, then gradually let the smile and affiliative lift recede as pitch lowers and narrows, energy softens, and phrasing slows into reflective sadness without becoming abruptly bleak."
+        ),
+        ("sad", "serious") => Some(
+            "Begin subdued and reflective, then restore enough energy and pitch control for composure: make articulation firmer, pauses more deliberate, and endings more resolved while leaving sadness behind rather than turning stern."
+        ),
+        ("serious", "sad") => Some(
+            "Begin focused and composed, then gradually release firmness, lower and narrow the pitch, soften energy, lengthen reflective pauses, and let the delivery become sad without becoming sleepy or theatrically mournful."
+        ),
+        ("concerned", "sad") => Some(
+            "Begin actively attentive with mild tension, then let urgency drain away: lower and narrow pitch, slow the phrasing, soften attacks, and settle into reflective sadness rather than fear or resignation."
+        ),
+        ("sad", "concerned") => Some(
+            "Begin subdued, then restore attentiveness and a little local tension: make pitch more responsive, timing slightly more active, and articulation more focused while avoiding panic or a sudden energy jump."
+        ),
+        ("excited", "serious") => Some(
+            "Begin animated, then channel the energy into focus: progressively narrow pitch excursions, release quick rhythmic peaks, stabilize intensity, lengthen pauses slightly, and finish deliberate and consequential rather than deflated."
+        ),
+        ("angry", "neutral") => Some(
+            "Begin with controlled anger, then progressively release vocal tension and hard attacks, lengthen pauses toward normal, normalize pitch movement and articulation, and finish naturally unmarked without sounding defeated."
+        ),
+        ("angry", "concerned") => Some(
+            "Begin firm and angry, then reduce hostility while retaining urgency: soften hard attacks, release tight vocal tension, make pitch more attentive and responsive, and finish concerned rather than submissive or fearful."
+        ),
+        ("neutral", "whisper") => Some(
+            "Begin with ordinary voiced conversation, then progressively reduce projection and vocal effort, soften attacks, increase audible airflow, and reduce periodic voicing over a natural span until the ending is an intelligible near-whisper."
+        ),
+        ("whisper", "neutral") => Some(
+            "Begin near-whispered, then progressively restore periodic voicing and ordinary projection, reduce excess airflow, strengthen clean attacks, and return to natural conversational energy without a sudden voiced onset."
+        ),
+        ("serious", "whisper") => Some(
+            "Begin focused and fully voiced, then preserve the serious intent while gradually reducing projection and vocal effort, softening attacks and adding airflow until the delivery becomes an intimate near-whisper rather than losing focus."
+        ),
+        ("whisper", "serious") => Some(
+            "Begin near-whispered, then gradually restore periodic voicing, projection, firm articulation and deliberate phrase endings so the speaker becomes fully voiced and serious without an abrupt phonation jump."
+        ),
+        _ => None,
+    }
+}
+
+fn transition_speed_clause(mode: MoodTransitionMode, speed: Option<MoodSpeedTransition>) -> String {
+    let Some(speed) = speed else { return String::new(); };
+    if (speed.to_percent - speed.from_percent).abs() < 0.001 {
+        return format!(
+            " Pace target: remain around {:.0}% of ordinary conversational pace throughout; preserve that tempo while the other prosodic cues evolve. Treat this percentage as a speaking-rate target, not as a pitch shift.",
+            speed.to_percent
+        );
+    }
+    let direction = if speed.to_percent > speed.from_percent { "accelerate" } else { "decelerate" };
+    let shape = match mode {
+        MoodTransitionMode::Gradual =>
+            "Spread the pace change across most of the phrase so several prosodic units participate and the listener can hear a continuous intermediate tempo.",
+        MoodTransitionMode::Quick =>
+            "Make the pace change early and clearly, but take at least two stressed words or one short prosodic unit to complete it; never jump tempo on a single syllable or word.",
+    };
+    format!(
+        " Pace transition: begin around {:.0}% of ordinary conversational pace and {direction} toward {:.0}% by the destination state. {shape} Treat these percentages as speaking-rate targets, not as a pitch shift.",
+        speed.from_percent, speed.to_percent
+    )
+}
+
+fn transition_short_guard(text: &str) -> &'static str {
+    let words = text.split_whitespace().count();
+    if words <= 10 {
+        " Because this is a short line, make the evolution perceptible but compact; do not perform two separate voices or insert an artificial pause at the midpoint."
+    } else {
+        ""
+    }
+}
+
+/// Build one evolving VoxCPM2 control instruction for an intra-utterance mood
+/// transition. This is prosody conditioning, not waveform crossfading: the
+/// entire phrase is synthesized once with one speaker/reference identity.
+pub(crate) fn build_transition_control(
+    from_style: &str,
+    from_intensity: &str,
+    to_style: &str,
+    to_intensity: &str,
+    mode: MoodTransitionMode,
+    text: &str,
+) -> Result<String, String> {
+    build_transition_control_with_speed(
+        from_style, from_intensity, to_style, to_intensity, mode, None, text,
+    )
+}
+
+/// Extended managed transition compiler with an optional speaking-rate envelope.
+/// The speed envelope is realized by VoxCPM2 prosody conditioning, not by
+/// repeatedly reconfiguring WSOLA mid-phrase; the latter would create avoidable
+/// discontinuities and metallic/phasey artifacts.
+pub(crate) fn build_transition_control_with_speed(
+    from_style: &str,
+    from_intensity: &str,
+    to_style: &str,
+    to_intensity: &str,
+    mode: MoodTransitionMode,
+    speed: Option<MoodSpeedTransition>,
+    text: &str,
+) -> Result<String, String> {
+    let from = normalize_transition_style(from_style)?;
+    let to = normalize_transition_style(to_style)?;
+    let from_intensity = normalize_transition_intensity(from_intensity)?;
+    let to_intensity = normalize_transition_intensity(to_intensity)?;
+
+    if from == to && from_intensity == to_intensity && speed.is_none() {
+        return Err("transition endpoints are identical; use the ordinary managed style instead".to_string());
+    }
+
+    let start = transition_signature(from, from_intensity);
+    let end = transition_signature(to, to_intensity);
+    let timing = match mode {
+        MoodTransitionMode::Gradual => {
+            "Let the change unfold continuously across the phrase, with the midpoint sounding like a believable intermediate state rather than a preset switch."
+        }
+        MoodTransitionMode::Quick => {
+            "Make the change early and clearly over a short natural span, then spend the remainder of the phrase established in the destination state; do not make an instantaneous acoustic cut."
+        }
+    };
+    let same_style_motion = "Keep the same emotional/style identity throughout and change only its strength: scale the defining cues continuously from the source intensity toward the destination intensity without resetting the voice or phrase.";
+    let speed_only_motion = "Keep the same emotional/style identity and intensity throughout; change only the speaking pace continuously, without resetting the voice, articulation, or phrase.";
+    let pair = if from == to {
+        if from_intensity == to_intensity { speed_only_motion } else { same_style_motion }
+    } else {
+        transition_pair_motion(from, to).unwrap_or(
+            "Continuously release the source style's distinctive cues while introducing the destination style's cues; preserve one speaker identity, one acoustic space, and continuous phrase timing throughout."
+        )
+    };
+    let speed_clause = transition_speed_clause(mode, speed);
+
+    Ok(format!(
+        "Begin {start}. End {end}. {timing} {pair}{speed_clause} Do not crossfade, double consonants, change speaker identity, or sound like two separately recorded takes.{}",
+        transition_short_guard(text)
+    ))
+}
+
+/// Conservative automatic CFG delta for a managed transition when the client
+/// leaves CFG unspecified. It averages the endpoint guidance so an expressive
+/// source such as Angry cannot become louder/more theatrical merely because a
+/// transition was requested.
+pub(crate) fn managed_transition_cfg_delta(
+    from_style: &str,
+    from_intensity: &str,
+    to_style: &str,
+    to_intensity: &str,
+) -> Result<f32, String> {
+    fn endpoint(style: &str, intensity: &str) -> Result<f32, String> {
+        let style = normalize_transition_style(style)?;
+        let intensity = normalize_transition_intensity(intensity)?;
+        let raw = build_style_control(style, intensity, "")
+            .ok_or_else(|| format!("style '{style}' has no managed control recipe"))?;
+        Ok(managed_style_tuning(Some(&raw)).cfg_delta)
+    }
+    let a = endpoint(from_style, from_intensity)?;
+    let b = endpoint(to_style, to_intensity)?;
+    Ok(((a + b) * 0.5).clamp(0.0, 0.20))
+}
+
+/// Transition synthesis should normally use the neutral speaker reference when
+/// a client owns a bank of per-style references. The API cannot select that
+/// file by itself, so this is exposed as engine policy for clients/demos.
+pub(crate) fn recommended_transition_reference_style() -> &'static str {
+    "neutral"
+}
+
 /// Compile a VoxGen-managed free-form instruction into a more acoustically
 /// specific prompt. Arbitrary custom controls are returned verbatim.
 pub fn refine_control_instruction(control: &str, text: &str) -> String {
@@ -845,6 +1200,63 @@ mod tests {
         assert_eq!(managed_style_tuning(Some(&serious_strong)), ManagedStyleTuning { cfg_delta: 0.10, demo_gain_multiplier: 1.0 });
     }
 
+
+    #[test]
+    fn serious_to_warm_transition_is_continuous_not_two_takes() {
+        let control = build_transition_control(
+            "serious", "normal", "warm", "subtle", MoodTransitionMode::Gradual,
+            "The report is difficult, but there is still something we can do.",
+        ).unwrap();
+        assert!(control.contains("Begin clearly serious and deliberate"));
+        assert!(control.contains("End lightly warm and affiliative"));
+        assert!(control.contains("release firmness and pitch restraint"));
+        assert!(control.contains("believable intermediate state"));
+        assert!(control.contains("Do not crossfade"));
+    }
+
+    #[test]
+    fn angry_to_serious_transition_releases_tension_not_volume() {
+        let control = build_transition_control(
+            "angry", "strong", "serious", "normal", MoodTransitionMode::Quick,
+            "This was unacceptable, and now we need to decide what happens next.",
+        ).unwrap();
+        assert!(control.contains("Strongly controlled cold anger") || control.contains("strongly controlled cold anger"));
+        assert!(control.contains("release vocal tension"));
+        assert!(control.contains("finish composed and consequential rather than angry"));
+        assert!(control.contains("short natural span"));
+    }
+
+    #[test]
+    fn transition_aliases_and_cfg_are_conservative() {
+        let control = build_transition_control(
+            "whisper-like", "subtle", "neutral", "normal", MoodTransitionMode::Gradual,
+            "You can hear me now, so I can speak normally again.",
+        ).unwrap();
+        assert!(control.contains("near-whispered"));
+        assert!(control.contains("affect-neutral"));
+        let delta = managed_transition_cfg_delta("warm", "normal", "serious", "normal").unwrap();
+        assert!((delta - 0.15).abs() < 1e-6);
+        assert_eq!(recommended_transition_reference_style(), "neutral");
+    }
+
+    #[test]
+    fn same_style_can_transition_between_intensities() {
+        let control = build_transition_control(
+            "angry", "normal", "angry", "subtle", MoodTransitionMode::Gradual,
+            "I am still upset, but I am getting myself under control.",
+        ).unwrap();
+        assert!(control.contains("change only its strength"));
+        assert!(control.contains("without resetting the voice or phrase"));
+    }
+
+    #[test]
+    fn identical_transition_is_rejected() {
+        let err = build_transition_control(
+            "neutral", "normal", "neutral", "normal", MoodTransitionMode::Gradual, "Hello."
+        ).unwrap_err();
+        assert!(err.contains("endpoints are identical"));
+    }
+
     #[test]
     fn managed_style_strength_is_conservative_and_explicit() {
         let warm = build_style_control("warm", "normal", "").unwrap();
@@ -865,6 +1277,66 @@ mod tests {
         assert_eq!(managed_style_tuning(Some(&whisper)).demo_gain_multiplier, 0.85);
         assert!((apply_managed_cfg(2.0, Some(&warm)) - 2.2).abs() < 1e-6);
         assert_eq!(apply_managed_cfg(2.95, Some(&warm)), 3.0);
+    }
+
+
+    #[test]
+    fn extended_pair_specific_transitions_have_distinct_motion() {
+        let cases = [
+            ("neutral", "serious", "tighten focus"),
+            ("cheerful", "excited", "raise arousal"),
+            ("concerned", "serious", "composed focus"),
+            ("warm", "gentle", "lowering vocal effort and projection"),
+            ("warm", "sad", "reflective sadness"),
+            ("sad", "serious", "restore enough energy"),
+            ("concerned", "sad", "urgency drain away"),
+            ("excited", "serious", "channel the energy into focus"),
+            ("angry", "neutral", "release vocal tension"),
+            ("angry", "concerned", "reduce hostility"),
+            ("neutral", "whisper", "reduce projection and vocal effort"),
+            ("serious", "whisper", "preserve the serious intent"),
+        ];
+        for (from, to, needle) in cases {
+            let control = build_transition_control(
+                from, "normal", to, "normal", MoodTransitionMode::Gradual,
+                "This sentence is long enough to make a natural transition audible.",
+            ).unwrap();
+            assert!(control.contains(needle), "missing {needle:?} in {from}->{to}: {control}");
+        }
+    }
+
+    #[test]
+    fn managed_speed_transition_rejects_micro_and_extreme_changes() {
+        let micro = MoodSpeedTransition::new(100.0, 103.0).unwrap_err();
+        assert!(micro.contains("too subtle"));
+        let extreme = MoodSpeedTransition::new(80.0, 130.0).unwrap_err();
+        assert!(extreme.contains("too large"));
+        assert!(parse_mood_speed_transition(None, Some(110.0)).unwrap_err().contains("supplied together"));
+    }
+
+    #[test]
+    fn quick_speed_transition_is_fast_but_not_abrupt() {
+        let speed = MoodSpeedTransition::new(90.0, 115.0).unwrap();
+        let control = build_transition_control_with_speed(
+            "serious", "normal", "warm", "normal", MoodTransitionMode::Quick,
+            Some(speed),
+            "We have considered the problem carefully, and now there is some genuinely good news to share.",
+        ).unwrap();
+        assert!(control.contains("90%"));
+        assert!(control.contains("115%"));
+        assert!(control.contains("at least two stressed words"));
+        assert!(control.contains("never jump tempo on a single syllable or word"));
+    }
+
+    #[test]
+    fn speed_only_transition_is_allowed_when_style_is_unchanged() {
+        let speed = MoodSpeedTransition::new(88.0, 100.0).unwrap();
+        let control = build_transition_control_with_speed(
+            "neutral", "normal", "neutral", "normal", MoodTransitionMode::Gradual,
+            Some(speed), "The explanation begins slowly and then returns to an ordinary conversational pace.",
+        ).unwrap();
+        assert!(control.contains("change only the speaking pace"));
+        assert!(control.contains("Pace transition"));
     }
 
 }

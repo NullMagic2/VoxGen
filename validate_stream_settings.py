@@ -13,8 +13,8 @@ def need(cond, msg):
     if not cond:
         raise AssertionError(msg)
 
-need('version = "0.7.55"' in root_cargo, 'root version')
-need('version = "0.7.55"' in demo_cargo, 'demo version')
+need('version = "0.7.60"' in root_cargo, 'root version')
+need('version = "0.7.60"' in demo_cargo, 'demo version')
 
 # CLI stream mode: explicit on/off, default off, bare compatibility switch -> on.
 for token in [
@@ -29,7 +29,7 @@ for token in [
     need(token in main, f'missing CLI streaming contract: {token}')
 need('stream: bool' not in main, 'legacy bool --stream field still present')
 need(main.count('stream_enabled,') >= 2, 'stream mode not passed to both server startup paths')
-need('--output-wav/--prompt-text/--control require --text' in main, 'text-only argument guard missing')
+need('--output-wav/--prompt-text/--control/--style/--intensity/--pace-percent require --text' in main, 'text-only argument guard missing')
 need('--stream on require --text' not in main, 'server streaming is still incorrectly tied to --text')
 
 # HTTP server must advertise and enforce the setting.
